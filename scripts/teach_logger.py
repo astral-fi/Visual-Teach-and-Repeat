@@ -1,551 +1,507 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python2
 # -*- coding: utf-8 -*-
 """
-teach_logger_node.py  —  ROS Melodic  (step 6 of Phase 1)
-═══════════════════════════════════════════════════════════
+ROS NODE NAME : /teach_logger
+SUBSCRIBES    : /keyframe/saved       (vtr/FrameFeatures) — from step4
+                /graph/node_added     (std_msgs/String)   — from step5
+                /graph/status         (std_msgs/String)   — from step5
+PUBLISHES     : /teach/status         (std_msgs/String)   — JSON teach state
+                /teach/hud            (sensor_msgs/Image) — live HUD overlay
 
-This ROS node drives the full Teach pipeline end-to-end during a
-manual drive.  It wires together Steps 2–5 and adds:
-  • ROS image subscription (sensor_msgs/Image via cv_bridge)
-  • Gamepad start / stop control (sensor_msgs/Joy)
-  • Live preview publisher so you can watch on rqt_image_view
-  • Status publisher for dashboard / terminal monitoring
-  • Graceful save-on-shutdown with rospy shutdown hook
+SERVICES      : /teach/start          (std_srvs/Trigger)  — begin recording
+                /teach/stop           (std_srvs/Trigger)  — end + save graph
+                /teach/mark_junction  (std_srvs/Trigger)  — Method 2 junction
+                /teach/mark_endpoint  (vtr/SetGoal)       — label last node
 
-TOPIC MAP
-─────────────────────────────────────────────────────────────────────
-  SUBSCRIBED
-  /camera/image_raw          sensor_msgs/Image   raw camera frames
-  /joy                       sensor_msgs/Joy     gamepad (btn 0 = teach toggle)
+WHAT THIS NODE DOES:
+    Orchestrates the entire Teach phase of the VT&R pipeline.
 
-  PUBLISHED
-  /teach/preview             sensor_msgs/Image   annotated debug frame
-  /teach/status              std_msgs/String     JSON status string
+    1. Listens for gamepad START button (or rosservice call /teach/start)
+       to begin a teach run.
 
-  SERVICES
-  /teach/start               std_srvs/Trigger    start teaching
-  /teach/stop                std_srvs/Trigger    stop + save graph
+    2. Monitors the pipeline — tracks nodes being added to the graph,
+       logs teach statistics in real time.
 
-PARAMETER SERVER  (set in launch file or rosparam)
-  ~clip_limit        float   CLAHE clip limit        default 2.0
-  ~tile_size         int     CLAHE tile size          default 8
-  ~n_features        int     ORB feature count        default 1000
-  ~score_threshold   float   Keyframe score gate      default 0.40
-  ~save_dir          str     Output directory         default ~/teach_memory
-  ~graph_filename    str     Graph pickle filename    default graph.pkl
-  ~joy_button        int     Gamepad button index     default 0
-  ~image_transport   str     raw / compressed         default raw
+    3. Provides junction marking — pressing the gamepad X button (or
+       calling /teach/mark_junction) flags the most recent node as a
+       junction for Method 2 multi-route branching.
 
-RUN
-  roslaunch vtr_jetracer teach.launch
-  — OR —
-  rosrun vtr_jetracer teach_logger_node.py
+    4. On STOP (gamepad SELECT or /teach/stop service):
+       - Marks the last node as endpoint with the configured label
+       - Calls /graph/save to persist the graph to disk
+       - Prints the full teach summary
 
-DEPENDENCIES  (all in the same ROS package src/ folder)
-  step2_clahe.py
-  step3_orb.py
-  step4_keyframe_scorer.py
-  step5_memory_graph.py
+    5. Publishes a live HUD image to /teach/hud showing:
+       - Recording state (IDLE / RECORDING / SAVED)
+       - Node count and save rate
+       - Last edge confidence and inlier count
+       - Junction markers
+
+GAMEPAD MAPPING (Bluetooth gamepad, ROS joy node):
+    Button 7 (START)  — begin teach
+    Button 6 (SELECT) — stop teach + save
+    Button 2 (X)      — mark current node as junction
+    Button 0 (A)      — mark current node as endpoint with label
+
+LAUNCH:
+    roslaunch vtr teach.launch route_id:=route_lab endpoint:="Lab door"
+
+PARAMS:
+    ~route_id        (str,   default='route_0')  passed to step5
+    ~endpoint_label  (str,   default='')         destination label
+    ~save_path       (str,   default='~/vtr_graph')
+    ~joy_topic       (str,   default='/joy')
+    ~hud_width       (int,   default=640)
+    ~hud_height      (int,   default=120)
+    ~append_mode     (bool,  default=False)
+=============================================================================
 """
 
-import os
-import sys
-import time
-import json
-import threading
-import pickle
-
 import rospy
-import cv2
 import numpy as np
+import cv2
+import json
+import os
+import time
 
-from sensor_msgs.msg import Image, Joy
 from std_msgs.msg    import String
 from std_srvs.srv    import Trigger, TriggerResponse
+from sensor_msgs.msg import Image, Joy
 from cv_bridge       import CvBridge, CvBridgeError
 
-# ── Import our pipeline steps ─────────────────────────────────────────────────
-# All four files must live in the same directory as this node.
-_HERE = os.path.dirname(os.path.abspath(__file__))
-if _HERE not in sys.path:
-    sys.path.insert(0, _HERE)
-
-from orb_node            import ORBExtractor, ClaheProcessor
 from vtr.msg import FrameFeatures
-from step4_keyframe_scorer import KeyframeScorer
-from step5_memory_graph   import MemoryGraph
+from vtr.srv import SetGoal, SetGoalResponse
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# TEACH LOGGER NODE
-# ─────────────────────────────────────────────────────────────────────────────
+# ── Teach state machine ───────────────────────────────────────────────────────
+
+IDLE      = 'IDLE'
+RECORDING = 'RECORDING'
+SAVED     = 'SAVED'
+
+
+# ── HUD colours ───────────────────────────────────────────────────────────────
+
+COL_GREEN  = (0,  200,  80)
+COL_RED    = (0,   60, 220)
+COL_AMBER  = (0,  160, 220)
+COL_WHITE  = (220, 220, 220)
+COL_DARK   = (30,   30,  30)
+COL_GREY   = (120, 120, 120)
+
+
+# ── ROS node ──────────────────────────────────────────────────────────────────
 
 class TeachLoggerNode(object):
     """
-    ROS node that records a Teach phase and builds the topological graph.
-
-    State machine
-    ─────────────
-      IDLE  ──[start srv / joy btn]──►  TEACHING  ──[stop srv / joy btn]──►  SAVING
-                                                                                 │
-                                                                              IDLE
-
-    Thread safety
-    ─────────────
-    The image callback runs in a ROS spinner thread.
-    The save / build operation runs in a separate thread so the ROS
-    spinner never blocks.  self._lock protects shared state.
+    Orchestrates the Teach phase and provides the operator interface.
     """
 
-    # ── States ────────────────────────────────────────────────────────────────
-    STATE_IDLE     = "IDLE"
-    STATE_TEACHING = "TEACHING"
-    STATE_SAVING   = "SAVING"
-
     def __init__(self):
-        rospy.init_node("teach_logger", anonymous=False)
-        rospy.loginfo("TeachLoggerNode: initialising …")
+        rospy.init_node('teach_logger', anonymous=False)
 
-        # ── Read ROS parameters ───────────────────────────────────────────────
-        self._clip_limit      = rospy.get_param("~clip_limit",     2.0)
-        self._tile_size       = rospy.get_param("~tile_size",       8)
-        self._n_features      = rospy.get_param("~n_features",   1000)
-        self._score_threshold = rospy.get_param("~score_threshold", 0.40)
-        self._save_dir        = os.path.expanduser(
-                                    rospy.get_param("~save_dir",
-                                                    "~/teach_memory"))
-        self._graph_filename  = rospy.get_param("~graph_filename", "graph.pkl")
-        self._joy_button      = rospy.get_param("~joy_button",      0)
+        # ── Params ────────────────────────────────────────────────────────
+        self.route_id      = rospy.get_param('~route_id',       'route_0')
+        self.ep_label      = rospy.get_param('~endpoint_label', '')
+        self.save_path     = os.path.expanduser(
+            rospy.get_param('~save_path', '~/vtr_graph'))
+        self.joy_topic     = rospy.get_param('~joy_topic',      '/joy')
+        self.hud_w         = rospy.get_param('~hud_width',       640)
+        self.hud_h         = rospy.get_param('~hud_height',      120)
+        self.append_mode   = rospy.get_param('~append_mode',     False)
 
-        # Camera topic — allows remapping in launch file
-        cam_topic = rospy.get_param("~camera_topic", "/camera/image_raw")
+        # ── State ─────────────────────────────────────────────────────────
+        self.state         = IDLE
+        self.teach_start_t = None
+        self.n_frames_recv = 0     # keyframes received from step4
+        self.n_nodes_added = 0     # nodes confirmed added to graph (step5)
+        self.last_edge     = None  # most recent edge info dict
+        self.last_node_id  = -1
+        self.junctions     = []    # node IDs marked as junctions
+        self.endpoints     = []    # (node_id, label) tuples
 
-        os.makedirs(self._save_dir, exist_ok=True)
+        # Gamepad debounce — track last button states
+        self._joy_prev     = {}
 
-        # ── Build pipeline objects ─────────────────────────────────────────────
-        self._clahe = ClaheProcessor(
-            K=K, D=D,
-            width=CAM_W, height=CAM_H,
-            clip_limit=self._clip_limit,
-            tile_size=(self._tile_size, self._tile_size)
-        )
-        self._orb    = ORBExtractor(n_features=self._n_features)
-        self._scorer = KeyframeScorer(self._orb,
-                                      score_threshold=self._score_threshold)
-        self._graph  = MemoryGraph(self._orb)
+        self.bridge        = CvBridge()
 
-        # ── Shared state ───────────────────────────────────────────────────────
-        self._lock           = threading.Lock()
-        self._state          = self.STATE_IDLE
-        self._collected      = []          # list of accepted FrameData
-        self._frames_seen    = 0           # total frames processed
-        self._last_joy_press = 0.0         # debounce timestamp
-        self._teach_start_t  = 0.0
+        # ── Subscribers ───────────────────────────────────────────────────
+        # Pipeline feedback
+        rospy.Subscriber('/keyframe/saved',  FrameFeatures,
+                         self._cb_kf_saved,  queue_size=5)
+        rospy.Subscriber('/graph/node_added', String,
+                         self._cb_node_added, queue_size=10)
+        rospy.Subscriber('/graph/status',     String,
+                         self._cb_graph_status, queue_size=2)
 
-        # ── cv_bridge ──────────────────────────────────────────────────────────
-        self._bridge = CvBridge()
+        # Gamepad
+        rospy.Subscriber(self.joy_topic, Joy,
+                         self._cb_joy, queue_size=1)
 
-        # ── Publishers ─────────────────────────────────────────────────────────
-        self._pub_preview = rospy.Publisher(
-            "/teach/preview", Image, queue_size=2)
-        self._pub_status = rospy.Publisher(
-            "/teach/status", String, queue_size=5)
+        # ── Publishers ────────────────────────────────────────────────────
+        self.pub_status = rospy.Publisher(
+            '/teach/status', String, queue_size=5)
+        self.pub_hud    = rospy.Publisher(
+            '/teach/hud', Image, queue_size=1)
 
-        # ── Subscribers ────────────────────────────────────────────────────────
-        rospy.Subscriber(cam_topic, Image,
-                         self._cb_image, queue_size=1,
-                         buff_size=2**24)   # large buffer for 1280×720
-        rospy.Subscriber("/joy", Joy,
-                         self._cb_joy, queue_size=10)
+        # ── Services ──────────────────────────────────────────────────────
+        rospy.Service('/teach/start',         Trigger,  self._srv_start)
+        rospy.Service('/teach/stop',          Trigger,  self._srv_stop)
+        rospy.Service('/teach/mark_junction', Trigger,  self._srv_mark_junction)
+        rospy.Service('/teach/mark_endpoint', SetGoal,  self._srv_mark_endpoint)
 
-        # ── Services ───────────────────────────────────────────────────────────
-        rospy.Service("/teach/start", Trigger, self._srv_start)
-        rospy.Service("/teach/stop",  Trigger, self._srv_stop)
+        # ── Proxy to step5 services ───────────────────────────────────────
+        rospy.loginfo("[TEACH] Waiting for /graph/save service...")
+        rospy.wait_for_service('/graph/save',      timeout=10.0)
+        rospy.wait_for_service('/graph/set_goal',  timeout=10.0)
+        rospy.wait_for_service('/graph/plan_route',timeout=10.0)
 
-        # ── Shutdown hook ─────────────────────────────────────────────────────
-        rospy.on_shutdown(self._on_shutdown)
+        self._svc_graph_save  = rospy.ServiceProxy('/graph/save',      Trigger)
+        self._svc_set_goal    = rospy.ServiceProxy('/graph/set_goal',   SetGoal)
+        self._svc_plan_route  = rospy.ServiceProxy('/graph/plan_route', SetGoal)
 
-        # ── Status timer (publishes /teach/status at 2 Hz) ────────────────────
-        rospy.Timer(rospy.Duration(0.5), self._cb_status_timer)
+        rospy.loginfo("[TEACH] Node ready.")
+        rospy.loginfo("[TEACH] route=%s  endpoint='%s'  append=%s",
+                      self.route_id, self.ep_label, self.append_mode)
+        rospy.loginfo("[TEACH] Controls:")
+        rospy.loginfo("[TEACH]   rosservice call /teach/start")
+        rospy.loginfo("[TEACH]   rosservice call /teach/stop")
+        rospy.loginfo("[TEACH]   rosservice call /teach/mark_junction")
+        rospy.loginfo("[TEACH]   rosservice call /teach/mark_endpoint "
+                      "\"goal_label: 'Lab door'\"")
+        rospy.loginfo("[TEACH]   Gamepad: START=begin  SELECT=stop  "
+                      "X=junction  A=endpoint")
 
-        rospy.loginfo("TeachLoggerNode: ready.")
-        rospy.loginfo(f"  Camera topic : {cam_topic}")
-        rospy.loginfo(f"  Save dir     : {self._save_dir}")
-        rospy.loginfo(f"  n_features   : {self._n_features}")
-        rospy.loginfo(f"  score thresh : {self._score_threshold}")
-        rospy.loginfo(f"  Joy button   : {self._joy_button}  (press to toggle teaching)")
-        rospy.loginfo("  Services: /teach/start  /teach/stop")
-        rospy.loginfo("  Preview : /teach/preview  (view with rqt_image_view)")
+    # ── Pipeline callbacks ────────────────────────────────────────────────
 
-    # ─────────────────────────────────────────────────────────────────────────
-    # IMAGE CALLBACK — runs in ROS spinner thread
-    # ─────────────────────────────────────────────────────────────────────────
+    def _cb_kf_saved(self, msg):
+        """Count keyframes approved by the scorer."""
+        if self.state == RECORDING:
+            self.n_frames_recv += 1
 
-    def _cb_image(self, msg):
-        """
-        Called for every camera frame.
-
-        Pipeline per frame:
-          1. cv_bridge  → numpy BGR array
-          2. ClaheProcessor.process()  → gray_clahe, bgr_undist
-          3. ORBExtractor.extract()    → FrameData (keypoints + descriptors)
-          4. KeyframeScorer.score()    → ScoredFrame (accept/reject decision)
-          5. If accepted AND teaching  → append to self._collected
-          6. Build annotated preview image
-          7. Publish preview on /teach/preview
-
-        The pipeline runs even in IDLE state so the preview is always live.
-        Only step 5 is gated on state == TEACHING.
-        """
-        with self._lock:
-            state = self._state
-
-        # ── Step 1: decode ROS image → numpy BGR ─────────────────────────────
+    def _cb_node_added(self, msg):
+        """Track nodes confirmed added to the graph by step5."""
+        if self.state != RECORDING:
+            return
         try:
-            bgr = self._bridge.imgmsg_to_cv2(msg, desired_encoding="bgr8")
-        except CvBridgeError as e:
-            rospy.logwarn_throttle(5.0, f"cv_bridge error: {e}")
+            data = json.loads(msg.data)
+        except ValueError:
             return
 
-        # ── Step 2: undistort + CLAHE ─────────────────────────────────────────
-        gray_clahe, bgr_undist = self._clahe.process(bgr)
+        self.n_nodes_added = data.get('total_nodes', self.n_nodes_added)
+        self.last_node_id  = data.get('node_id', self.last_node_id)
 
-        # ── Step 3: ORB extraction ────────────────────────────────────────────
-        ts = msg.header.stamp.to_sec()
-        fd = self._orb.extract(gray_clahe, ts, bgr=bgr_undist)
+        # Cache last edge info for HUD
+        edge = data.get('edge')
+        if edge is not None:
+            self.last_edge = edge
 
-        # ── Step 4: keyframe scoring ──────────────────────────────────────────
-        sf = self._scorer.score(fd)
+        # Log every 10 nodes
+        if self.n_nodes_added % 10 == 0 and self.n_nodes_added > 0:
+            rospy.loginfo(
+                "[TEACH] %d nodes  edge_inliers=%s  conf=%s",
+                self.n_nodes_added,
+                str(data.get('edge_inliers', 'N/A')),
+                str(data.get('edge_conf',    'N/A'))
+            )
 
-        with self._lock:
-            self._frames_seen += 1
+    def _cb_graph_status(self, msg):
+        """Receive graph heartbeat — no action needed, just confirms step5 alive."""
+        pass
 
-            # ── Step 5: save if teaching ──────────────────────────────────────
-            if state == self.STATE_TEACHING and sf.accepted:
-                self._collected.append(fd)
-
-        # ── Step 6 + 7: build and publish preview ────────────────────────────
-        preview = self._make_preview(bgr_undist, fd, sf, state)
-        try:
-            preview_msg = self._bridge.cv2_to_imgmsg(preview, encoding="bgr8")
-            preview_msg.header = msg.header
-            self._pub_preview.publish(preview_msg)
-        except CvBridgeError as e:
-            rospy.logwarn_throttle(5.0, f"preview publish error: {e}")
-
-    # ─────────────────────────────────────────────────────────────────────────
-    # JOYSTICK CALLBACK
-    # ─────────────────────────────────────────────────────────────────────────
+    # ── Gamepad ───────────────────────────────────────────────────────────
 
     def _cb_joy(self, msg):
         """
-        Toggle teaching on/off with a single gamepad button press.
+        Parse gamepad button events.
+        Uses rising-edge detection to avoid repeated triggers.
 
-        Uses a 0.5-second debounce to prevent double-triggers from
-        button bounce on the F710 / PS4 controllers.
-
-        Button index is set by ~joy_button parameter (default 0 = A/X button).
+        Button mapping (standard Bluetooth gamepad):
+            0 = A        → mark endpoint
+            2 = X        → mark junction
+            6 = SELECT   → stop + save
+            7 = START    → start teach
         """
-        if self._joy_button >= len(msg.buttons):
-            return
+        buttons = list(msg.buttons)
 
-        if msg.buttons[self._joy_button] == 1:
-            now = time.time()
-            if now - self._last_joy_press < 0.5:
-                return   # debounce
-            self._last_joy_press = now
-            self._toggle_teaching()
+        def rising(idx):
+            """True on button press (0→1 transition)."""
+            if idx >= len(buttons):
+                return False
+            prev = self._joy_prev.get(idx, 0)
+            curr = buttons[idx]
+            return curr == 1 and prev == 0
 
-    def _toggle_teaching(self):
-        with self._lock:
-            state = self._state
-
-        if state == self.STATE_IDLE:
+        if rising(7):   # START
             self._do_start()
-        elif state == self.STATE_TEACHING:
+        if rising(6):   # SELECT
             self._do_stop()
-        # In SAVING state: ignore button press
+        if rising(2):   # X — mark junction
+            self._do_mark_junction()
+        if rising(0):   # A — mark endpoint with configured label
+            if self.ep_label:
+                self._do_mark_endpoint(self.ep_label)
 
-    # ─────────────────────────────────────────────────────────────────────────
-    # SERVICES
-    # ─────────────────────────────────────────────────────────────────────────
+        # Update previous state
+        for i, b in enumerate(buttons):
+            self._joy_prev[i] = b
 
-    def _srv_start(self, req):
-        """rosservice call /teach/start"""
-        with self._lock:
-            state = self._state
-        if state != self.STATE_IDLE:
-            return TriggerResponse(
-                success=False,
-                message=f"Cannot start: currently in state {state}")
-        self._do_start()
-        return TriggerResponse(success=True, message="Teaching started")
-
-    def _srv_stop(self, req):
-        """rosservice call /teach/stop"""
-        with self._lock:
-            state = self._state
-        if state != self.STATE_TEACHING:
-            return TriggerResponse(
-                success=False,
-                message=f"Cannot stop: currently in state {state}")
-        self._do_stop()
-        return TriggerResponse(success=True,
-                               message="Teaching stopped — saving graph …")
-
-    # ─────────────────────────────────────────────────────────────────────────
-    # STATE TRANSITIONS
-    # ─────────────────────────────────────────────────────────────────────────
+    # ── Core actions ──────────────────────────────────────────────────────
 
     def _do_start(self):
-        """Transition IDLE → TEACHING."""
-        with self._lock:
-            self._state         = self.STATE_TEACHING
-            self._collected     = []
-            self._teach_start_t = time.time()
-            # Reset scorer so last-accepted-frame comparison starts fresh
-            self._scorer        = KeyframeScorer(
-                                      self._orb,
-                                      score_threshold=self._score_threshold)
-            self._graph         = MemoryGraph(self._orb)
-
-        rospy.loginfo("━━━ TEACHING STARTED ━━━  Drive the robot now.")
-        rospy.loginfo(f"  Press Joy button {self._joy_button} again to stop.")
+        if self.state == RECORDING:
+            rospy.logwarn("[TEACH] Already recording.")
+            return
+        self.state         = RECORDING
+        self.teach_start_t = time.time()
+        self.n_frames_recv = 0
+        self.n_nodes_added = 0
+        self.last_edge     = None
+        self.last_node_id  = -1
+        self.junctions     = []
+        self.endpoints     = []
+        rospy.loginfo("[TEACH] *** RECORDING STARTED ***  route=%s",
+                      self.route_id)
 
     def _do_stop(self):
-        """
-        Transition TEACHING → SAVING.
-        Launches graph building in a background thread so the ROS
-        spinner is never blocked.
-        """
-        with self._lock:
-            self._state = self.STATE_SAVING
-            frames      = list(self._collected)   # snapshot
-
-        duration = time.time() - self._teach_start_t
-        n_frames  = len(frames)
-        rospy.loginfo(f"━━━ TEACHING STOPPED ━━━  {n_frames} keyframes "
-                      f"in {duration:.1f}s  →  building graph …")
-
-        t = threading.Thread(target=self._build_and_save,
-                             args=(frames,),
-                             daemon=True,
-                             name="GraphBuilder")
-        t.start()
-
-    # ─────────────────────────────────────────────────────────────────────────
-    # GRAPH BUILD + SAVE  (background thread)
-    # ─────────────────────────────────────────────────────────────────────────
-
-    def _build_and_save(self, frames):
-        """
-        Runs Algorithm 1 (MemoryGraph.build_from_frames) then saves:
-          teach_memory/graph.pkl          ← the MemoryGraph object
-          teach_memory/teach_frames.pkl   ← raw FrameData list (for ablation)
-          teach_memory/metadata.json      ← run stats (human-readable)
-        """
-        t0 = time.time()
-
-        if len(frames) < 2:
-            rospy.logwarn("Too few frames to build graph (need ≥ 2). "
-                          "Did you drive long enough?")
-            with self._lock:
-                self._state = self.STATE_IDLE
+        if self.state != RECORDING:
+            rospy.logwarn("[TEACH] Not recording — nothing to stop.")
             return
 
-        # ── Algorithm 1 ───────────────────────────────────────────────────────
-        rospy.loginfo(f"Building graph from {len(frames)} keyframes …")
-        self._graph.build_from_frames(frames, verbose=False)
-        build_time = time.time() - t0
+        rospy.loginfo("[TEACH] Stopping teach run...")
 
-        # ── Save graph.pkl ────────────────────────────────────────────────────
-        graph_path = os.path.join(self._save_dir, self._graph_filename)
-        self._graph.save(graph_path)
+        # Mark endpoint if label set and no explicit endpoint marked yet
+        if self.ep_label and not self.endpoints:
+            self._do_mark_endpoint(self.ep_label)
 
-        # ── Save raw frames (needed for ablation study and VO trail) ──────────
-        frames_path = os.path.join(self._save_dir, "teach_frames.pkl")
-        with open(frames_path, "wb") as f:
-            pickle.dump(frames, f, protocol=pickle.HIGHEST_PROTOCOL)
-        frames_kb = os.path.getsize(frames_path) / 1024
+        # Call step5 graph save service
+        try:
+            resp = self._svc_graph_save()
+            if resp.success:
+                rospy.loginfo("[TEACH] Graph saved: %s", resp.message)
+            else:
+                rospy.logwarn("[TEACH] Save failed: %s", resp.message)
+        except rospy.ServiceException as e:
+            rospy.logerr("[TEACH] /graph/save error: %s", str(e))
 
-        # ── Save human-readable metadata ─────────────────────────────────────
-        stats = self._graph.stats() if hasattr(self._graph, "stats") else {}
-        metadata = {
-            "timestamp":       time.strftime("%Y-%m-%d %H:%M:%S"),
-            "n_teach_frames":  len(frames),
-            "n_graph_nodes":   len(self._graph.nodes),
-            "n_graph_edges":   sum(len(n.edges)
-                                   for n in self._graph.nodes.values()),
-            "build_time_s":    round(build_time, 2),
-            "teach_duration_s": round(time.time() - self._teach_start_t, 1),
-            "acceptance_rate": round(self._scorer.acceptance_rate, 3),
-            "frames_seen":     self._frames_seen,
-            "n_features":      self._n_features,
-            "score_threshold": self._score_threshold,
-            "clip_limit":      self._clip_limit,
-        }
-        meta_path = os.path.join(self._save_dir, "metadata.json")
-        with open(meta_path, "w") as f:
-            json.dump(metadata, f, indent=2)
+        self.state = SAVED
+        self._print_teach_summary()
 
-        rospy.loginfo("━━━ GRAPH SAVED ━━━")
-        rospy.loginfo(f"  Nodes      : {len(self._graph.nodes)}")
-        rospy.loginfo(f"  Dir edges  : {metadata['n_graph_edges']}")
-        rospy.loginfo(f"  Build time : {build_time:.1f}s")
-        rospy.loginfo(f"  graph.pkl  : {graph_path}")
-        rospy.loginfo(f"  frames.pkl : {frames_path}  ({frames_kb:.0f} KB)")
-        rospy.loginfo(f"  metadata   : {meta_path}")
-
-        with self._lock:
-            self._state = self.STATE_IDLE
-
-        rospy.loginfo("Ready for next teach run.  Press Joy button to start.")
-
-    # ────────────────────────────────────────────────────────────────────────
-    # PREVIEW BUILDER
-    # ─────────────────────────────────────────────────────────────────────────
-
-    def _make_preview(self, bgr_undist, fd, sf, state):
+    def _do_mark_junction(self):
         """
-        Annotated preview frame published on /teach/preview.
-
-        Annotations:
-          • ORB keypoints coloured by accept (green) / reject (red)
-          • 4×4 grid lines (spatial entropy reference)
-          • Top-left HUD: state, keyframe count, score, reason
-          • Top-right: flashing red REC indicator when teaching
-          • Bottom: score bars (count | entropy | combined)
+        Mark the most recently added node as a junction (Method 2).
+        Publishes a SetGoal call to step5 — step5 handles the flag.
+        In practice step5 is listening for /teach/mark_junction and
+        we call it via the node_added callback index.
         """
-        out = bgr_undist.copy()
-        h, w = out.shape[:2]
+        if self.state != RECORDING:
+            rospy.logwarn("[TEACH] Not recording — cannot mark junction.")
+            return
+        if self.last_node_id < 0:
+            rospy.logwarn("[TEACH] No node added yet.")
+            return
 
-        # ── Keypoints ─────────────────────────────────────────────────────────
-        kp_col = (0, 200, 0) if sf.accepted else (0, 60, 220)
-        for kp in fd.keypoints:
-            cv2.circle(out, (int(kp.pt[0]), int(kp.pt[1])), 3, kp_col, -1)
+        # We publish the junction request via a dedicated topic
+        # step5 reads /graph/status to know which node to flag
+        # The actual flagging is done by calling the step5 internal
+        # mark_junction method — here we log and track it
+        self.junctions.append(self.last_node_id)
+        rospy.loginfo("[TEACH] Junction marked at node %d", self.last_node_id)
 
-        # ── 4×4 grid (entropy reference) ──────────────────────────────────────
-        for r in range(1, 4):
-            cv2.line(out, (0, r * h // 4), (w, r * h // 4), (40, 40, 40), 1)
-        for c in range(1, 4):
-            cv2.line(out, (c * w // 4, 0), (c * w // 4, h), (40, 40, 40), 1)
+        # Publish to /graph/junction_event so step5 can react
+        # (step5 also exposes a mark_junction service)
+        try:
+            svc = rospy.ServiceProxy('/graph/mark_junction', Trigger)
+            svc()
+        except Exception:
+            pass  # Service optional — step5 may not expose it
 
-        # ── HUD box ───────────────────────────────────────────────────────────
-        with self._lock:
-            n_collected = len(self._collected)
-            accept_rate = self._scorer.acceptance_rate
+    def _do_mark_endpoint(self, label):
+        if self.state != RECORDING:
+            rospy.logwarn("[TEACH] Not recording — cannot mark endpoint.")
+            return
+        if self.last_node_id < 0:
+            rospy.logwarn("[TEACH] No node to mark as endpoint.")
+            return
 
-        lines = [
-            f"STATE: {state}",
-            f"KF saved: {n_collected}  ({accept_rate:.0%} accepted)",
-            f"Features: {fd.n_features}",
-            f"Score: {sf.combined_score:.2f}  "
-            f"(cnt={sf.count_score:.2f} ent={sf.entropy_score:.2f})",
-        ]
-        if not sf.accepted:
-            lines.append(f"REJECT: {sf.reject_reason[:35]}")
+        self.endpoints.append((self.last_node_id, label))
+        rospy.loginfo("[TEACH] Endpoint '%s' marked at node %d",
+                      label, self.last_node_id)
 
-        box_h = len(lines) * 18 + 8
-        cv2.rectangle(out, (4, 4), (380, box_h), (0, 0, 0), -1)
-        for i, line in enumerate(lines):
-            cv2.putText(out, line, (8, 20 + i * 18),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.48, (0, 255, 0), 1)
+        try:
+            resp = self._svc_set_goal(label)
+            if not resp.success:
+                rospy.logwarn("[TEACH] set_goal failed: %s", resp.message)
+        except rospy.ServiceException as e:
+            rospy.logwarn("[TEACH] /graph/set_goal error: %s", str(e))
 
-        # ── REC indicator (flashing at ~1 Hz) ────────────────────────────────
-        if state == self.STATE_TEACHING:
-            if int(time.time() * 2) % 2 == 0:   # blink every 0.5 s
-                cv2.circle(out, (w - 20, 20), 10, (0, 0, 220), -1)
-                cv2.putText(out, "REC", (w - 55, 26),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 220), 2)
-        elif state == self.STATE_SAVING:
-            cv2.putText(out, "SAVING…", (w - 100, 26),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 200, 255), 2)
+    # ── Services ──────────────────────────────────────────────────────────
 
-        # ── Score bars (bottom strip) ─────────────────────────────────────────
-        bar_y  = h - 20
-        bar_h  = 10
-        bar_w  = 120
+    def _srv_start(self, req):
+        self._do_start()
+        return TriggerResponse(
+            success=True,
+            message='Recording started  route=%s' % self.route_id
+        )
 
-        def draw_bar(x, val, colour, label):
-            cv2.rectangle(out, (x, bar_y), (x + bar_w, bar_y + bar_h),
-                          (40, 40, 40), -1)
-            fill = int(bar_w * max(0.0, min(val, 1.0)))
-            if fill > 0:
-                cv2.rectangle(out, (x, bar_y),
-                              (x + fill, bar_y + bar_h), colour, -1)
-            cv2.putText(out, f"{label} {val:.2f}",
-                        (x, bar_y - 3),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.38, (200, 200, 200), 1)
+    def _srv_stop(self, req):
+        if self.state != RECORDING:
+            return TriggerResponse(success=False,
+                                   message='Not recording')
+        self._do_stop()
+        return TriggerResponse(
+            success=True,
+            message='Teach complete  nodes=%d' % self.n_nodes_added
+        )
 
-        draw_bar(4,   sf.count_score,   (0, 220, 255), "cnt")
-        draw_bar(132, sf.entropy_score, (255, 200, 0), "ent")
-        draw_bar(260, sf.combined_score,(80, 255, 80), "comb")
+    def _srv_mark_junction(self, req):
+        self._do_mark_junction()
+        return TriggerResponse(
+            success=True,
+            message='Junction at node %d' % self.last_node_id
+        )
 
-        return out
+    def _srv_mark_endpoint(self, req):
+        self._do_mark_endpoint(req.goal_label)
+        return SetGoalResponse(
+            success=True,
+            message='Endpoint %s at node %d' % (
+                req.goal_label, self.last_node_id)
+        )
 
-    # ─────────────────────────────────────────────────────────────────────────
-    # STATUS TIMER  (publishes JSON to /teach/status at 2 Hz)
-    # ─────────────────────────────────────────────────────────────────────────
+    # ── HUD image ─────────────────────────────────────────────────────────
 
-    def _cb_status_timer(self, event):
+    def _build_hud(self):
         """
-        Publishes a JSON string on /teach/status.
-        Useful for a ROS dashboard or custom monitoring node.
+        Build a HUD image showing teach state.
+        Published to /teach/hud — view with rqt_image_view.
 
-        JSON fields:
-          state, n_collected, n_nodes, frames_seen,
-          acceptance_rate, teach_duration_s
+        Layout:
+            [STATE badge] [nodes: N] [frames: N] [duration: Xs]
+            [edge: inliers=N conf=0.XX] [junctions: N] [route: name]
         """
-        with self._lock:
-            state       = self._state
-            n_collected = len(self._collected)
-            n_nodes     = len(self._graph.nodes)
-            frames_seen = self._frames_seen
-            accept_rate = self._scorer.acceptance_rate
+        hud = np.zeros((self.hud_h, self.hud_w, 3), dtype=np.uint8)
+        hud[:] = COL_DARK
 
-        duration = (time.time() - self._teach_start_t
-                    if state == self.STATE_TEACHING else 0.0)
-
-        status = {
-            "state":            state,
-            "n_collected":      n_collected,
-            "n_nodes":          n_nodes,
-            "frames_seen":      frames_seen,
-            "acceptance_rate":  round(accept_rate, 3),
-            "teach_duration_s": round(duration, 1),
-            "stamp":            time.time(),
-        }
-        self._pub_status.publish(String(data=json.dumps(status)))
-
-    # ─────────────────────────────────────────────────────────────────────────
-    # SHUTDOWN
-    # ─────────────────────────────────────────────────────────────────────────
-
-    def _on_shutdown(self):
-        """
-        rospy calls this on Ctrl-C / rosnode kill.
-        If teaching is active, save whatever we have.
-        """
-        with self._lock:
-            state   = self._state
-            frames  = list(self._collected)
-
-        if state == self.STATE_TEACHING and len(frames) >= 2:
-            rospy.logwarn("Shutdown during teaching — saving partial graph …")
-            self._do_stop()
-            time.sleep(2.0)   # give background thread time to finish
+        # State badge
+        if self.state == IDLE:
+            badge_col  = COL_GREY
+            badge_text = ' IDLE '
+        elif self.state == RECORDING:
+            badge_col  = COL_GREEN
+            badge_text = ' REC  '
         else:
-            rospy.loginfo("TeachLoggerNode: clean shutdown.")
+            badge_col  = COL_AMBER
+            badge_text = ' SAVED'
+
+        cv2.rectangle(hud, (8, 8), (100, 44), badge_col, -1)
+        cv2.putText(hud, badge_text, (12, 33),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.65, COL_DARK, 2)
+
+        # Duration
+        if self.teach_start_t is not None and self.state == RECORDING:
+            dur = time.time() - self.teach_start_t
+            dur_str = '%ds' % int(dur)
+        else:
+            dur_str = '--'
+
+        # Row 1 — main stats
+        stats1 = 'nodes: %d    frames: %d    duration: %s    route: %s' % (
+            self.n_nodes_added, self.n_frames_recv, dur_str, self.route_id
+        )
+        cv2.putText(hud, stats1, (112, 30),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, COL_WHITE, 1)
+
+        # Row 2 — edge quality
+        if self.last_edge is not None:
+            inliers = self.last_edge.get('edge_inliers', 0)
+            conf    = self.last_edge.get('edge_conf',    0.0)
+            lat     = self.last_edge.get('lateral',      0.0)
+            yaw     = self.last_edge.get('yaw_deg',      0.0)
+            conf_col = COL_GREEN if conf > 0.4 else COL_RED
+            edge_str = 'last edge: inliers=%d  conf=%.2f  lat=%+.3f  yaw=%+.1fdeg' % (
+                inliers, conf, lat, yaw
+            )
+            cv2.putText(hud, edge_str, (12, 68),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.50, conf_col, 1)
+        else:
+            cv2.putText(hud, 'last edge: --', (12, 68),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.50, COL_GREY, 1)
+
+        # Row 3 — junctions and endpoint
+        junc_str = 'junctions: %d    endpoint: %s' % (
+            len(self.junctions),
+            ('"%s" @ node %d' % self.endpoints[-1][1::-1])
+            if self.endpoints else '--'
+        )
+        cv2.putText(hud, junc_str, (12, 100),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.50, COL_AMBER, 1)
+
+        # Controls reminder at right edge
+        ctrl = 'START=rec  SELECT=stop  X=junction'
+        cv2.putText(hud, ctrl, (self.hud_w - 330, 100),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.42, COL_GREY, 1)
+
+        return hud
+
+    def _publish_hud(self):
+        if self.pub_hud.get_num_connections() == 0:
+            return
+        hud = self._build_hud()
+        try:
+            msg = self.bridge.cv2_to_imgmsg(hud, 'bgr8')
+            self.pub_hud.publish(msg)
+        except CvBridgeError:
+            pass
+
+    # ── Summary ───────────────────────────────────────────────────────────
+
+    def _print_teach_summary(self):
+        dur = (time.time() - self.teach_start_t) if self.teach_start_t else 0
+        rospy.loginfo("=" * 52)
+        rospy.loginfo("[TEACH] TEACH RUN COMPLETE")
+        rospy.loginfo("  route          : %s", self.route_id)
+        rospy.loginfo("  duration       : %.1f s", dur)
+        rospy.loginfo("  nodes saved    : %d", self.n_nodes_added)
+        rospy.loginfo("  frames recv    : %d", self.n_frames_recv)
+        rospy.loginfo("  save rate      : %.1f%%",
+                      100.0 * self.n_nodes_added / max(self.n_frames_recv, 1))
+        rospy.loginfo("  junctions      : %d  %s",
+                      len(self.junctions), str(self.junctions))
+        rospy.loginfo("  endpoints      : %s", str(self.endpoints))
+        rospy.loginfo("  graph path     : %s", self.save_path)
+        rospy.loginfo("=" * 52)
+        rospy.loginfo("[TEACH] To start Repeat phase:")
+        rospy.loginfo("  roslaunch vtr repeat.launch "
+                      "goal:='%s'", self.ep_label or 'your_destination')
+
+    # ── Spin ──────────────────────────────────────────────────────────────
 
     def spin(self):
-        rospy.spin()
+        rate = rospy.Rate(10)   # 10 Hz — enough for HUD and status
+        while not rospy.is_shutdown():
+            # Publish status JSON
+            status = {
+                'state'        : self.state,
+                'route_id'     : self.route_id,
+                'n_nodes'      : self.n_nodes_added,
+                'n_frames'     : self.n_frames_recv,
+                'last_node_id' : self.last_node_id,
+                'n_junctions'  : len(self.junctions),
+                'endpoints'    : self.endpoints,
+                'append_mode'  : self.append_mode,
+            }
+            self.pub_status.publish(String(data=json.dumps(status)))
+
+            # Publish HUD
+            self._publish_hud()
+
+            rate.sleep()
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# ENTRY POINT
-# ─────────────────────────────────────────────────────────────────────────────
+# ── Entry point ───────────────────────────────────────────────────────────────
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     try:
         node = TeachLoggerNode()
         node.spin()

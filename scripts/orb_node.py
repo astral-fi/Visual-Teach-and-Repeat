@@ -1,30 +1,12 @@
 #!/usr/bin/env python2
-# -*- coding: utf-8 -*-
-"""
-=============================================================================
-step3_orb_node.py  —  ROS Melodic ORB Feature Extractor Node
-VT&R Project | Phase 1
-
+""""
 ROS NODE NAME : /orb_extractor
 SUBSCRIBES    : /camera/image_raw        (sensor_msgs/Image)
 PUBLISHES     : /orb/keyframe_candidate  (vtr/FrameFeatures — custom msg)
                 /orb/debug_image         (sensor_msgs/Image)
                 /orb/stats               (std_msgs/String — JSON)
 
-PIPELINE POSITION:
-    /camera/image_raw
-        → clahe_preprocessor  (step2, runs inline here)
-        → ORB extraction      (this node)
-        → /orb/keyframe_candidate
-        → keyframe_scorer     (step4, subscribes to above)
-
-WHY ROS MELODIC (Python 2):
-    Jetson Nano ships with Ubuntu 18.04. ROS Melodic is the supported
-    distro. Python 2.7 is the default interpreter for rospy on Melodic.
-    All numpy/cv2 APIs used here are compatible with Python 2.7.
-
-CUSTOM MESSAGE (vtr/FrameFeatures):
-    Place this in your catkin package vtr/msg/FrameFeatures.msg:
+vtr/msg/FrameFeatures:
 
         Header   header
         float64  timestamp
@@ -37,13 +19,9 @@ CUSTOM MESSAGE (vtr/FrameFeatures):
         float32[] keypoint_size     # keypoint scale sizes
         int32[]  keypoint_octave    # pyramid level per keypoint
 
-    Add to CMakeLists.txt:
-        add_message_files(FILES FrameFeatures.msg)
-        generate_messages(DEPENDENCIES std_msgs sensor_msgs)
-
-RUN:
-    rosrun vtr step3_orb_node.py
-    rosrun vtr step3_orb_node.py _n_features:=800 _clip_limit:=3.0
+HOW TO RUN:
+    rosrun vtr orb_node.py
+    rosrun vtr orb_node.py _n_features:=800 _clip_limit:=3.0
 
 PARAMS (set via rosparam or launch file):
     ~n_features   (int,   default=1000)  max ORB keypoints per frame
@@ -71,7 +49,6 @@ from sensor_msgs.msg import Image
 from std_msgs.msg    import String
 from cv_bridge       import CvBridge, CvBridgeError
 
-# Custom message — generated from vtr/msg/FrameFeatures.msg
 from vtr.msg import FrameFeatures
 
 
@@ -87,10 +64,7 @@ OCTAVE_COLOURS = [
 # ── Calibration loader ────────────────────────────────────────────────────────
 
 def load_calibration(yaml_path):
-    """
-    Load K and D from calibration.yaml produced by step1_calibrate.py.
-    Returns (K, D) as numpy arrays, or (None, None) if file not found.
-    """
+
     import yaml
     if not yaml_path or not os.path.exists(yaml_path):
         rospy.logwarn("[ORB] calibration.yaml not found at: %s", yaml_path)
@@ -110,14 +84,10 @@ def load_calibration(yaml_path):
     return K, D
 
 
-# ── CLAHE preprocessor (inline — no separate import needed) ──────────────────
-
 class ClaheProcessor(object):
     """
     Inline CLAHE preprocessor.
     Undistorts then applies adaptive histogram equalisation.
-    Kept here so this node has zero external Python dependencies
-    beyond cv2, numpy, and rospy.
     """
 
     def __init__(self, K, D, clip_limit=2.0, tile_size=8):
@@ -131,18 +101,13 @@ class ClaheProcessor(object):
         )
         self.map1 = None
         self.map2 = None
-        rospy.loginfo("[ORB] CLAHE  clip=%.1f  tile=%dx%d",
-                      clip_limit, tile_size, tile_size)
+        rospy.loginfo("[ORB] CLAHE  clip=%.1f  tile=%dx%d", clip_limit, tile_size, tile_size)
 
     def _init_maps(self, h, w):
         if self.K is None or self.D is None:
             return
-        new_K, _ = cv2.getOptimalNewCameraMatrix(
-            self.K, self.D, (w, h), alpha=0, newImgSize=(w, h)
-        )
-        self.map1, self.map2 = cv2.initUndistortRectifyMap(
-            self.K, self.D, None, new_K, (w, h), cv2.CV_16SC2
-        )
+        new_K, _ = cv2.getOptimalNewCameraMatrix(self.K, self.D, (w, h), alpha=0, newImgSize=(w, h))
+        self.map1, self.map2 = cv2.initUndistortRectifyMap(self.K, self.D, None, new_K, (w, h), cv2.CV_16SC2)
         self.K = new_K
         rospy.loginfo("[ORB] Undistortion maps ready for %dx%d", w, h)
 
@@ -215,10 +180,8 @@ class ORBExtractor(object):
         knnMatch + Lowe ratio test.
         Returns list of good cv2.DMatch objects.
         Used for consecutive-frame match quality logging only.
-        Full RANSAC matching happens in step5 geometry engine.
         """
-        if (desc_a is None or desc_b is None
-                or len(desc_a) < 2 or len(desc_b) < 2):
+        if (desc_a is None or desc_b is None or len(desc_a) < 2 or len(desc_b) < 2):
             return []
         try:
             pairs = self.matcher.knnMatch(desc_a, desc_b, k=2)
@@ -233,13 +196,13 @@ class ORBExtractor(object):
                     good.append(m)
         return good
 
-    def orientation_filter(self, good, kp_a, kp_b,
-                           n_bins=30, top_k=3):
+    def orientation_filter(self, good, kp_a, kp_b, n_bins=30, top_k=3):
         """
         ORB-SLAM3 rotation histogram filter.
         Keeps only matches whose (angle_a - angle_b) delta falls in
         the top-K histogram bins. Removes 20-40% of ratio-test survivors.
         """
+
         if len(good) < 8:
             return good
 
@@ -247,6 +210,7 @@ class ORBExtractor(object):
             kp_a[m.queryIdx].angle - kp_b[m.trainIdx].angle
             for m in good
         ])
+
         hist, bin_edges = np.histogram(deltas, bins=n_bins,
                                        range=(-180.0, 180.0))
         top_idx = np.argsort(hist)[-top_k:]

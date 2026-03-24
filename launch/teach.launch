@@ -1,0 +1,101 @@
+<!-- vtr/launch/teach.launch -->
+<!--
+    Launches the complete Phase 1 Teach pipeline:
+        step3_orb_node        — CLAHE + ORB extraction
+        step4_keyframe_scorer — quality scoring
+        step5_memory_graph    — graph construction
+        step6_teach_logger    — operator interface + HUD
+
+    Usage:
+        roslaunch vtr teach.launch
+        roslaunch vtr teach.launch route_id:=route_lab endpoint:="Lab door"
+        roslaunch vtr teach.launch route_id:=route_office endpoint:="Office 204" append_mode:=true
+
+    Then to begin recording:
+        rosservice call /teach/start
+
+    To mark a junction during the drive:
+        rosservice call /teach/mark_junction
+
+    To stop and save:
+        rosservice call /teach/stop
+
+    To monitor live:
+        rqt_image_view /teach/hud
+        rostopic echo /keyframe/stats
+        rostopic echo /graph/node_added
+-->
+
+<launch>
+
+  <!-- ── Arguments ──────────────────────────────────────────────────── -->
+  <arg name="route_id"     default="route_0"/>
+  <arg name="endpoint"     default=""/>
+  <arg name="append_mode"  default="false"/>
+  <arg name="save_path"    default="$(env HOME)/vtr_graph"/>
+  <arg name="calib_path"   default="$(find vtr)/config/calibration.yaml"/>
+  <arg name="n_features"   default="1000"/>
+  <arg name="clip_limit"   default="2.0"/>
+  <arg name="debug_viz"    default="true"/>
+
+  <!-- ── Bluetooth gamepad (joy node) ───────────────────────────────── -->
+  <node pkg="joy" type="joy_node" name="joy_node" output="screen">
+    <param name="dev"           value="/dev/input/js0"/>
+    <param name="deadzone"      value="0.05"/>
+    <param name="autorepeat_rate" value="0"/>
+  </node>
+
+  <!-- ── Step 3: ORB extractor ──────────────────────────────────────── -->
+  <node pkg="vtr" type="orb_node.py"
+        name="orb_extractor" output="screen">
+    <param name="calib_path"   value="$(arg calib_path)"/>
+    <param name="n_features"   value="$(arg n_features)"/>
+    <param name="scale_factor" value="1.2"/>
+    <param name="n_levels"     value="8"/>
+    <param name="fast_thresh"  value="20"/>
+    <param name="lowe_ratio"   value="0.75"/>
+    <param name="clip_limit"   value="$(arg clip_limit)"/>
+    <param name="tile_size"    value="8"/>
+    <param name="debug_viz"    value="$(arg debug_viz)"/>
+    <param name="publish_rate" value="30"/>
+  </node>
+
+  <!-- ── Step 4: Keyframe scorer ────────────────────────────────────── -->
+  <node pkg="vtr" type="keyscorer.py"
+        name="keyframe_scorer" output="screen">
+    <param name="max_features"       value="500"/>
+    <param name="min_features"       value="150"/>
+    <param name="save_threshold"     value="0.6"/>
+    <param name="reject_threshold"   value="0.4"/>
+    <param name="min_novelty"        value="0.15"/>
+    <param name="similarity_ratio"   value="0.75"/>
+    <param name="borderline_timeout" value="2.0"/>
+    <param name="weights"            value="0.4,0.4,0.2"/>
+  </node>
+
+  <!-- ── Step 5: Memory graph ───────────────────────────────────────── -->
+  <node pkg="vtr" type="memory_graph.py"
+        name="memory_graph" output="screen">
+    <param name="route_id"          value="$(arg route_id)"/>
+    <param name="endpoint_label"    value="$(arg endpoint)"/>
+    <param name="append_mode"       value="$(arg append_mode)"/>
+    <param name="save_path"         value="$(arg save_path)"/>
+    <param name="calib_path"        value="$(arg calib_path)"/>
+    <param name="min_edge_inliers"  value="10"/>
+    <param name="overlap_threshold" value="40"/>
+    <param name="overlap_votes"     value="3"/>
+  </node>
+
+  <!-- ── Step 6: Teach logger ───────────────────────────────────────── -->
+  <node pkg="vtr" type="teach_logger.py"
+        name="teach_logger" output="screen">
+    <param name="route_id"       value="$(arg route_id)"/>
+    <param name="endpoint_label" value="$(arg endpoint)"/>
+    <param name="save_path"      value="$(arg save_path)"/>
+    <param name="joy_topic"      value="/joy"/>
+    <param name="hud_width"      value="640"/>
+    <param name="hud_height"     value="120"/>
+    <param name="append_mode"    value="$(arg append_mode)"/>
+  </node>
+
+</launch>
