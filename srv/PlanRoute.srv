@@ -1,0 +1,11 @@
+# vtr/srv/PlanRoute.srv
+# Run BFS from node 0 to the named endpoint.
+# Returns the ordered sequence of node IDs to traverse.
+# Usage: rosservice call /graph/plan_route "goal_label: 'Lab door'"
+
+string goal_label
+---
+bool    success
+int32[] node_sequence
+string  message
+

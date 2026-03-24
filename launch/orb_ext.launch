@@ -1,0 +1,42 @@
+<!-- vtr/launch/orb_extractor.launch -->
+<!--
+    Launches the ORB feature extraction node.
+
+    Usage:
+        roslaunch vtr orb_extractor.launch
+        roslaunch vtr orb_extractor.launch n_features:=800 debug_viz:=false
+
+    To view debug image:
+        rqt_image_view /orb/debug_image
+
+    To monitor stats:
+        rostopic echo /orb/stats
+-->
+
+<launch>
+
+  <!-- ORB extractor node -->
+  <node pkg="vtr" type="orb_node.py"
+        name="orb_extractor" output="screen">
+
+    <!-- Camera and calibration -->
+    <param name="calib_path"    value="$(find vtr)/config/calibration.yaml"/>
+
+    <!-- ORB parameters -->
+    <param name="n_features"    value="1000"/>
+    <param name="scale_factor"  value="1.2"/>
+    <param name="n_levels"      value="8"/>
+    <param name="fast_thresh"   value="20"/>
+    <param name="lowe_ratio"    value="0.75"/>
+
+    <!-- CLAHE parameters -->
+    <param name="clip_limit"    value="2.0"/>
+    <param name="tile_size"     value="8"/>
+
+    <!-- Node behaviour -->
+    <param name="debug_viz"     value="true"/>
+    <param name="publish_rate"  value="30"/>
+
+  </node>
+
+</launch>

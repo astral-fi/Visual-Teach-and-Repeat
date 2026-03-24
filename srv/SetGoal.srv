@@ -1,0 +1,9 @@
+# vtr/srv/SetGoal.srv
+# Set the repeat destination before starting the Repeat phase.
+# Usage: rosservice call /graph/set_goal "goal_label: 'Lab door'"
+
+string goal_label
+---
+bool   success
+string message
+
