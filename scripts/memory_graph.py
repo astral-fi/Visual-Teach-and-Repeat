@@ -579,7 +579,7 @@ class MemoryGraphNode(object):
             rospy.logwarn("[GRAPH] Empty descriptors — skip")
             return
 
-        desc = np.array(msg.descriptors_flat,
+        desc = np.frombuffer(msg.descriptors_flat,
                         dtype=np.uint8).reshape(-1, 32)
 
         # ── Append overlap check ───────────────────────────────────────

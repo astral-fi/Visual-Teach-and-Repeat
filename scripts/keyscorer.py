@@ -298,7 +298,7 @@ class KeyframeScorerNode(object):
 
         # ── Reconstruct descriptors and keypoint angles ────────────────
         if len(msg.descriptors_flat) > 0:
-            desc = np.array(msg.descriptors_flat,
+            desc = np.frombuffer(msg.descriptors_flat,
                             dtype=np.uint8).reshape(-1, 32)
         else:
             desc = None
