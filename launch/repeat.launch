@@ -1,0 +1,68 @@
+<!-- vtr/launch/repeat.launch -->
+<!--
+    Launches the complete Repeat phase pipeline:
+        step3_orb_node         — CLAHE + ORB extraction (reused from Teach)
+        step7_geometry_engine  — RANSAC + LK fallback → path_error
+        step8_pid_controller   — PID + Ackermann → /cmd_vel
+
+    Usage:
+        roslaunch vtr repeat.launch goal:="Lab door"
+        roslaunch vtr repeat.launch goal:="Office 204" base_speed:=0.2
+
+    To start the robot moving:
+        rosservice call /repeat/start
+
+    To stop immediately:
+        rosservice call /repeat/stop
+
+    Monitor:
+        rostopic echo /pid/debug
+        rostopic echo /geometry/result
+        rqt_image_view /geometry/debug_image
+-->
+
+<launch>
+
+  <!-- ── Arguments ──────────────────────────────────────────────────── -->
+  <arg name="goal"         default=""/>
+  <arg name="graph_path"   default="$(env HOME)/vtr_graph"/>
+  <arg name="calib_path"   default="$(find vtr)/config/calibration.yaml"/>
+  <arg name="base_speed"   default="0.3"/>
+  <arg name="Kp"           default="0.5"/>
+  <arg name="Ki"           default="0.02"/>
+  <arg name="Kd"           default="0.1"/>
+  <arg name="debug_viz"    default="true"/>
+
+  <!-- ── Step 7: Geometry engine ────────────────────────────────────── -->
+  <node pkg="vtr" type="geometry_engine.py"
+        name="geometry_engine" output="screen">
+    <param name="calib_path"        value="$(arg calib_path)"/>
+    <param name="lowe_ratio"        value="0.75"/>
+    <param name="ransac_threshold"  value="1.0"/>
+    <param name="ransac_prob"       value="0.999"/>
+    <param name="min_inliers"       value="15"/>
+    <param name="lk_threshold"      value="15"/>
+    <param name="w_lateral"         value="0.7"/>
+    <param name="w_yaw"             value="0.3"/>
+    <param name="clip_limit"        value="2.0"/>
+    <param name="n_features"        value="500"/>
+    <param name="debug_viz"         value="$(arg debug_viz)"/>
+  </node>
+
+  <!-- ── Step 8: PID controller ─────────────────────────────────────── -->
+  <node pkg="vtr" type="pid_controller.py"
+        name="pid_controller" output="screen">
+    <param name="Kp"              value="$(arg Kp)"/>
+    <param name="Ki"              value="$(arg Ki)"/>
+    <param name="Kd"              value="$(arg Kd)"/>
+    <param name="base_speed"      value="$(arg base_speed)"/>
+    <param name="max_steer"       value="0.6"/>
+    <param name="dead_band_tight" value="0.05"/>
+    <param name="dead_band_wide"  value="0.15"/>
+    <param name="max_integral"    value="0.5"/>
+    <param name="cmd_rate"        value="20.0"/>
+    <param name="timeout"         value="0.5"/>
+  </node>
+
+</launch>
+
