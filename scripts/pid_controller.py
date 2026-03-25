@@ -8,7 +8,7 @@ VT&R Project | Phase 2
 ROS NODE NAME : /pid_controller
 SUBSCRIBES    : /geometry/path_error   (std_msgs/Float32)  — from step7
                 /geometry/result       (std_msgs/String)   — JSON for dead-band
-                /repeat/state          (std_msgs/String)   — RUNNING/STOPPED
+                /repeat/start          (std_msgs/String)   — RUNNING/STOPPED
 
 PUBLISHES     : /cmd_vel               (geometry_msgs/Twist) — to JetRacer
                 /pid/debug             (std_msgs/String)   — JSON PID state
@@ -78,7 +78,7 @@ import time
 
 from std_msgs.msg    import Float32, String
 from geometry_msgs.msg import Twist
-
+from std_srvs.srv import Trigger, TriggerReponse
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 
@@ -256,9 +256,10 @@ class PIDControllerNode(object):
                          self._cb_path_error, queue_size=1)
         rospy.Subscriber('/geometry/result',     String,
                          self._cb_geo_result,   queue_size=1)
-        rospy.Subscriber('/repeat/state',        String,
-                         self._cb_repeat_state, queue_size=5)
-
+        rospy.wait_for_service('/repeat/start', timeout=10.0)
+        tmp1 = rospy.ServiceProxy('/repeat/start', Trigger)
+        if tmp1.sucess:
+            self.running = True
         # ── Publishers ────────────────────────────────────────────────────
         self.pub_cmd   = rospy.Publisher('/cmd_vel', Twist, queue_size=1)
         self.pub_debug = rospy.Publisher('/pid/debug', String, queue_size=5)
@@ -309,29 +310,29 @@ class PIDControllerNode(object):
                 self.pid.reset()
             self.last_node_id = node_id
 
-    def _cb_repeat_state(self, msg):
-        """
-        Receive repeat controller state.
-        Expected values: 'RUNNING', 'STOPPED', 'FAILURE'
-        """
-        try:
-            data = json.loads(msg.data)
-            state = data.get('state', msg.data)
-        except ValueError:
-            state = msg.data.strip()
+    # def _cb_repeat_state(self, msg):
+    #     """
+    #     Receive repeat controller state.
+    #     Expected values: 'RUNNING', 'STOPPED', 'FAILURE'
+    #     """
+    #     try:
+    #         data = json.loads(msg.data)
+    #         state = data.get('state', msg.data)
+    #     except ValueError:
+    #         state = msg.data.strip()
 
-        if state == 'RUNNING':
-            if not self.running:
-                rospy.loginfo("[PID] Activated — publishing /cmd_vel")
-                self.pid.reset()
-            self.running = True
+    #     if state == 'RUNNING':
+    #         if not self.running:
+    #             rospy.loginfo("[PID] Activated — publishing /cmd_vel")
+    #             self.pid.reset()
+    #         self.running = True
 
-        elif state in ('STOPPED', 'FAILURE', 'COMPLETE'):
-            if self.running:
-                rospy.loginfo("[PID] Deactivated — state=%s", state)
-                self._publish_stop()
-            self.running = False
-            self.pid.reset()
+    #     elif state in ('STOPPED', 'FAILURE', 'COMPLETE'):
+    #         if self.running:
+    #             rospy.loginfo("[PID] Deactivated — state=%s", state)
+    #             self._publish_stop()
+    #         self.running = False
+    #         self.pid.reset()
 
     # ── Main control loop ─────────────────────────────────────────────────
 
