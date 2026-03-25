@@ -61,10 +61,11 @@ import time
 import sys
 from std_msgs.msg import String
 from std_srvs.srv import Trigger, TriggerResponse
-from memory_graph import TopologicalMemoryGraph, KeyframeNode
+from memory_graph import TopologicalMemoryGraph, KeyframeNode, Edge
 
 sys.modules['__main__'].TopologicalMemoryGraph = TopologicalMemoryGraph
 sys.modules['__main__'].KeyframeNode = KeyframeNode
+sys.modules['__main__'].Edge = Edge
 
 # ── State machine constants ───────────────────────────────────────────────────
 
