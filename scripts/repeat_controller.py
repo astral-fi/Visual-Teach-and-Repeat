@@ -58,10 +58,13 @@ import json
 import os
 import pickle
 import time
-
+import sys
 from std_msgs.msg import String
 from std_srvs.srv import Trigger, TriggerResponse
+from memory_graph import TopologicalMemoryGraph, KeyframeNode
 
+sys.modules['__main__'].TopologicalMemoryGraph = TopologicalMemoryGraph
+sys.modules['__main__'].KeyframeNode = KeyframeNode
 
 # ── State machine constants ───────────────────────────────────────────────────
 
