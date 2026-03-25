@@ -38,13 +38,6 @@
   <arg name="clip_limit"   default="2.0"/>
   <arg name="debug_viz"    default="true"/>
 
-  <!-- ── Bluetooth gamepad (joy node) ───────────────────────────────── -->
-  <node pkg="joy" type="joy_node" name="joy_node" output="screen">
-    <param name="dev"           value="/dev/input/js0"/>
-    <param name="deadzone"      value="0.05"/>
-    <param name="autorepeat_rate" value="0"/>
-  </node>
-
   <!-- ── Step 3: ORB extractor ──────────────────────────────────────── -->
   <node pkg="vtr" type="orb_node.py"
         name="orb_extractor" output="screen">

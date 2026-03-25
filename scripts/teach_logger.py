@@ -232,9 +232,9 @@ class TeachLoggerNode(object):
             curr = buttons[idx]
             return curr == 1 and prev == 0
 
-        if rising(7):   # START
+        if rising(10):   # START
             self._do_start()
-        if rising(6):   # SELECT
+        if rising(11):   # SELECT
             self._do_stop()
         if rising(2):   # X — mark junction
             self._do_mark_junction()

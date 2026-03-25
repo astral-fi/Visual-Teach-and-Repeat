@@ -1,4 +1,5 @@
 #!/usr/bin/env python2
+# -*- coding: utf-8 -*-
 """"
 ROS NODE NAME : /orb_extractor
 SUBSCRIBES    : /camera/image_raw        (sensor_msgs/Image)

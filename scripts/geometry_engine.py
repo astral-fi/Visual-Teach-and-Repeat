@@ -501,6 +501,7 @@ class GeometryEngineNode(object):
             self.min_inliers, self.lk_threshold
         )
 
+
     # ── Calibration ───────────────────────────────────────────────────────
 
     def _load_calibration(self, calib_path):
