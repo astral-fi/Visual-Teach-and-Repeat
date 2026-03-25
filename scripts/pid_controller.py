@@ -9,6 +9,7 @@ ROS NODE NAME : /pid_controller
 SUBSCRIBES    : /geometry/path_error   (std_msgs/Float32)  — from step7
                 /geometry/result       (std_msgs/String)   — JSON for dead-band
                 /repeat/state          (std_msgs/String)   — RUNNING/STOPPED
+
 PUBLISHES     : /cmd_vel               (geometry_msgs/Twist) — to JetRacer
                 /pid/debug             (std_msgs/String)   — JSON PID state
 
