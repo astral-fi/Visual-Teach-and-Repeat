@@ -35,7 +35,7 @@
 
 
  <node pkg="vtr" type="repeat_controller.py"
-        name="repeat_controller" output="screen" launch-prefix="bash -c 'sleep 1 &amp;&amp; exec'">
+        name="repeat_controller" output="screen">
     <param name="graph_path"      value="$(arg graph_path)"/>
     <param name="goal_label"      value="$(arg goal)"/>
     <param name="min_inliers"     value="15"/>

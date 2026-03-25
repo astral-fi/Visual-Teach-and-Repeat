@@ -530,10 +530,12 @@ class GeometryEngineNode(object):
         try:
             data = json.loads(msg.data)
         except ValueError:
+            rospy.logwarn("[GEO DEBUG] Failed to parse JSON from /graph/current_node!")
             return
 
         flat = data.get('descriptors_flat', [])
         if not flat:
+            rospy.logwarn("[GEO DEBUG] JSON parsed, but 'descriptors_flat' is empty!")
             return
 
         self.current_node_desc     = np.array(
