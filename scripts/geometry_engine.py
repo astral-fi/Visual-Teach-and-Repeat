@@ -63,12 +63,14 @@ import yaml
 import time
 
 from std_msgs.msg    import String, Float32
-from sensor_msgs.msg import Image
+from sensor_msgs.msg import Image, Joy
 from cv_bridge       import CvBridge, CvBridgeError
+from std_srvs.srv import Trigger, TriggerResponse
 
-
-# ── Configuration ─────────────────────────────────────────────────────────────
-
+# ── Configuration ───────────────────────────────────────────────────────────
+RUNNING = 'RUNNING'
+IDLE = 'IDLE'
+STOP = 'STOPPED'
 LOWE_RATIO       = 0.75
 RANSAC_THRESHOLD = 1.0
 RANSAC_PROB      = 0.999
@@ -434,7 +436,8 @@ class GeometryEngineNode(object):
         self.clip_limit   = rospy.get_param('~clip_limit',       CLIP_LIMIT)
         self.n_features   = rospy.get_param('~n_features',       N_FEATURES)
         self.debug        = rospy.get_param('~debug_viz',        True)
-
+        self.joy_topic     = rospy.get_param('~joy_topic',      '/joy')
+        self.state = IDLE
         # ── Calibration ───────────────────────────────────────────────────
         self.K, self.D = self._load_calibration(calib_path)
 
@@ -466,6 +469,7 @@ class GeometryEngineNode(object):
         self.current_node_kp_oct   = []
         self.current_node_id       = -1
 
+        self._joy_prev     = {}
         # ── Statistics ────────────────────────────────────────────────────
         self.n_ransac_success = 0
         self.n_lk_fallback    = 0
@@ -477,7 +481,11 @@ class GeometryEngineNode(object):
                          self._cb_image, queue_size=1, buff_size=2**24)
         rospy.Subscriber('/graph/current_node', String,
                          self._cb_node, queue_size=5)
-
+        
+        rospy.Subscriber(self.joy_topic, Joy,
+                         self._cb_joy, queue_size=1)
+        rospy.Service('/repeat/start',         Trigger,  self._srv_start)
+        rospy.Service('/repeat/stop',          Trigger,  self._srv_stop)
         # ── Publishers ────────────────────────────────────────────────────
         self.pub_error  = rospy.Publisher(
             '/geometry/path_error', Float32, queue_size=1)
@@ -511,6 +519,18 @@ class GeometryEngineNode(object):
         return K, D
 
     # ── Node callback — load current target ───────────────────────────────
+    def _do_start(self):
+        if self.state == RUNNING:
+            rospy.logwarn("[REPEAT] Already running.")
+            return
+        self.state         = RUNNING
+
+    def _srv_start(self, req):
+        self._do_start()
+        return TriggerResponse(
+            success=True,
+            message='Running started  route=%s' % self.route_id
+        )
 
     def _cb_node(self, msg):
         """
@@ -673,6 +693,35 @@ class GeometryEngineNode(object):
                 result.inlier_count, result.confidence,
                 result.path_error, result.process_ms
             )
+
+
+    def _cb_joy(self, msg):
+        """
+        Parse gamepad button events.
+        Uses rising-edge detection to avoid repeated triggers.
+
+        Button mapping (standard Bluetooth gamepad):
+            0 = A        → mark endpoint
+            2 = X        → mark junction
+            6 = SELECT   → stop + save
+            7 = START    → start teach
+        """
+        buttons = list(msg.buttons)
+
+        def rising(idx):
+            """True on button press (0→1 transition)."""
+            if idx >= len(buttons):
+                return False
+            prev = self._joy_prev.get(idx, 0)
+            curr = buttons[idx]
+            return curr == 1 and prev == 0
+
+        if rising(11):   # START
+            self._do_start()
+
+        # Update previous state
+        for i, b in enumerate(buttons):
+            self._joy_prev[i] = b
 
     # ── Failure handling ──────────────────────────────────────────────────
 
