@@ -33,6 +33,19 @@
   <arg name="Kd"           default="0.1"/>
   <arg name="debug_viz"    default="true"/>
 
+
+ <node pkg="vtr" type="repeat_controller.py"
+        name="repeat_controller" output="screen" launch-prefix="bash -c 'sleep 1 &amp;&amp; exec'">
+    <param name="graph_path"      value="$(arg graph_path)"/>
+    <param name="goal_label"      value="$(arg goal)"/>
+    <param name="min_inliers"     value="15"/>
+    <param name="advance_votes"   value="2"/>
+    <param name="failure_timeout" value="3.0"/>
+    <param name="lookahead"       value="3"/>
+    <param name="endpoint_hold"   value="1.0"/>
+    <param name="publish_rate"    value="20.0"/>
+  </node>
+
   <!-- ── Step 7: Geometry engine ────────────────────────────────────── -->
   <node pkg="vtr" type="geometry_engine.py"
         name="geometry_engine" output="screen">
