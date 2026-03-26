@@ -534,6 +534,7 @@ class GeometryEngineNode(object):
             return
 
         flat = data.get('descriptors_flat', [])
+        print(flat)
         if not flat:
             rospy.logwarn("[GEO DEBUG] JSON parsed, but 'descriptors_flat' is empty!")
             return
@@ -593,14 +594,15 @@ class GeometryEngineNode(object):
                 self.current_node_desc, kp_node_cv,
                 desc_live,             list(kp_live_cv)
             )
-
+        rospy.logwarn(str(success))
+        rospy.logwarn(str(inlier_count >= self.min_inliers))
         if success and inlier_count >= self.min_inliers:
             # Good RANSAC result — extract steering signals
             lateral    = float(t[0][0])
             yaw        = float(np.arctan2(R[1, 0], R[0, 0]))
             path_error = self.w_lateral * lateral + self.w_yaw * yaw
             dead_band  = 0.05 if confidence > 0.4 else 0.15
-
+            rospy.logwarn(str(path_error))
             result.success      = True
             result.method       = 'ransac'
             result.inlier_count = inlier_count
@@ -624,7 +626,7 @@ class GeometryEngineNode(object):
         else:
             # ── LK optical flow fallback ───────────────────────────────
             lk_lateral, lk_count = self.lk.compute(gray)
-
+            rospy.logwarn("lk_count" + str(lk_count))
             if lk_count >= 4:
                 result.success      = True
                 result.method       = 'lk'
