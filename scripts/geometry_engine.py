@@ -473,7 +473,7 @@ class GeometryEngineNode(object):
         self.consec_failures  = 0
 
         # ── Subscribers ───────────────────────────────────────────────────
-        rospy.Subscriber('/camera/image_raw', Image,
+        rospy.Subscriber('/csi_cam_0/image_raw', Image,
                          self._cb_image, queue_size=1, buff_size=2**24)
         rospy.Subscriber('/graph/current_node', String,
                          self._cb_node, queue_size=5)
@@ -534,7 +534,6 @@ class GeometryEngineNode(object):
             return
 
         flat = data.get('descriptors_flat', [])
-        print(flat)
         if not flat:
             rospy.logwarn("[GEO DEBUG] JSON parsed, but 'descriptors_flat' is empty!")
             return

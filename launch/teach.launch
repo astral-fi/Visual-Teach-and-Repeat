@@ -30,11 +30,11 @@
 
   <!-- ── Arguments ──────────────────────────────────────────────────── -->
   <arg name="route_id"     default="route_0"/>
-  <arg name="endpoint"     default=""/>
+  <arg name="endpoint"     default="lab"/>
   <arg name="append_mode"  default="false"/>
   <arg name="save_path"    default="$(env HOME)/vtr_graph"/>
   <arg name="calib_path"   default="$(find vtr)/config/calibration.yaml"/>
-  <arg name="n_features"   default="1000"/>
+  <arg name="n_features"   default="2000"/>
   <arg name="clip_limit"   default="2.0"/>
   <arg name="debug_viz"    default="true"/>
 
@@ -56,7 +56,7 @@
   <!-- ── Step 4: Keyframe scorer ────────────────────────────────────── -->
   <node pkg="vtr" type="keyscorer.py"
         name="keyframe_scorer" output="screen">
-    <param name="max_features"       value="500"/>
+    <param name="max_features"       value="1000"/>
     <param name="min_features"       value="150"/>
     <param name="save_threshold"     value="0.6"/>
     <param name="reject_threshold"   value="0.4"/>

@@ -18,7 +18,7 @@
 
 <launch>
 
-  <arg name="goal"        default=""/>
+  <arg name="goal"        default="lab"/>
   <arg name="graph_path"  default="$(env HOME)/vtr_graph"/>
   <arg name="calib_path"  default="$(find vtr)/config/calibration.yaml"/>
   <arg name="base_speed"  default="0.3"/>
@@ -27,16 +27,6 @@
   <arg name="Kd"          default="0.1"/>
   <arg name="debug_viz"   default="true"/>
 
-  <!-- ── Step 10: IMU publisher ─────────────────────────────────────── -->
-  <node pkg="vtr" type="imu_publisher.py"
-        name="imu_publisher" output="screen">
-    <param name="i2c_bus"      value="1"/>
-    <param name="i2c_addr"     value="0x68"/>
-    <param name="publish_rate" value="100"/>
-    <param name="frame_id"     value="imu"/>
-    <param name="accel_scale"  value="2"/>
-    <param name="gyro_scale"   value="250"/>
-  </node>
 
   <!-- ── Step 11: Visual odometry bridge ────────────────────────────── -->
   <node pkg="vtr" type="vo_bridge.py"
@@ -56,8 +46,7 @@
 
   <!-- ── Step 9: Repeat controller ──────────────────────────────────── -->
   <node pkg="vtr" type="repeat_controller.py"
-        name="repeat_controller" output="screen"
-        launch-prefix="bash -c 'sleep 1 &amp;&amp; exec'">
+        name="repeat_controller" output="screen">
     <param name="graph_path"      value="$(arg graph_path)"/>
     <param name="goal_label"      value="$(arg goal)"/>
     <param name="min_inliers"     value="15"/>
@@ -79,7 +68,7 @@
     <param name="w_lateral"        value="0.7"/>
     <param name="w_yaw"            value="0.3"/>
     <param name="clip_limit"       value="2.0"/>
-    <param name="n_features"       value="500"/>
+    <param name="n_features"       value="1000"/>
     <param name="debug_viz"        value="$(arg debug_viz)"/>
   </node>
 
