@@ -1,0 +1,113 @@
+<!-- vtr/launch/repeat_ekf.launch -->
+<!--
+    Phase 3 Repeat pipeline with EKF sensor fusion.
+    Adds:
+        step10 — MPU9250 IMU publisher
+        step11 — Visual odometry bridge
+        ekf    — robot_localization EKF node
+
+    PID controller automatically prefers /odometry/filtered (EKF output)
+    over raw /geometry/path_error when available. No code changes needed.
+
+    Usage:
+        roslaunch vtr repeat_ekf.launch goal:="Lab door"
+
+    Fallback (EKF disabled — reverts to Phase 2):
+        roslaunch vtr repeat.launch goal:="Lab door"
+-->
+
+<launch>
+
+  <arg name="goal"        default=""/>
+  <arg name="graph_path"  default="$(env HOME)/vtr_graph"/>
+  <arg name="calib_path"  default="$(find vtr)/config/calibration.yaml"/>
+  <arg name="base_speed"  default="0.3"/>
+  <arg name="Kp"          default="0.5"/>
+  <arg name="Ki"          default="0.02"/>
+  <arg name="Kd"          default="0.1"/>
+  <arg name="debug_viz"   default="true"/>
+
+  <!-- ── Step 10: IMU publisher ─────────────────────────────────────── -->
+  <node pkg="vtr" type="imu_publisher.py"
+        name="imu_publisher" output="screen">
+    <param name="i2c_bus"      value="1"/>
+    <param name="i2c_addr"     value="0x68"/>
+    <param name="publish_rate" value="100"/>
+    <param name="frame_id"     value="imu"/>
+    <param name="accel_scale"  value="2"/>
+    <param name="gyro_scale"   value="250"/>
+  </node>
+
+  <!-- ── Step 11: Visual odometry bridge ────────────────────────────── -->
+  <node pkg="vtr" type="vo_bridge.py"
+        name="visual_odometry_bridge" output="screen">
+    <param name="frame_id"        value="odom"/>
+    <param name="child_frame_id"  value="base_link"/>
+    <param name="base_covariance" value="0.05"/>
+  </node>
+
+  <!-- ── EKF: robot_localization ────────────────────────────────────── -->
+  <node pkg="robot_localization" type="ekf_localization_node"
+        name="ekf_localization" output="screen"
+        clear_params="true">
+    <rosparam command="load"
+              file="$(find vtr)/config/ekf_config.yaml"/>
+  </node>
+
+  <!-- ── Step 9: Repeat controller ──────────────────────────────────── -->
+  <node pkg="vtr" type="repeat_controller.py"
+        name="repeat_controller" output="screen"
+        launch-prefix="bash -c 'sleep 1 &amp;&amp; exec'">
+    <param name="graph_path"      value="$(arg graph_path)"/>
+    <param name="goal_label"      value="$(arg goal)"/>
+    <param name="min_inliers"     value="15"/>
+    <param name="advance_votes"   value="2"/>
+    <param name="failure_timeout" value="3.0"/>
+    <param name="lookahead"       value="3"/>
+    <param name="endpoint_hold"   value="1.0"/>
+    <param name="publish_rate"    value="20.0"/>
+  </node>
+
+  <!-- ── Step 7: Geometry engine ────────────────────────────────────── -->
+  <node pkg="vtr" type="geometry_engine.py"
+        name="geometry_engine" output="screen">
+    <param name="calib_path"       value="$(arg calib_path)"/>
+    <param name="lowe_ratio"       value="0.75"/>
+    <param name="ransac_threshold" value="1.0"/>
+    <param name="min_inliers"      value="15"/>
+    <param name="lk_threshold"     value="15"/>
+    <param name="w_lateral"        value="0.7"/>
+    <param name="w_yaw"            value="0.3"/>
+    <param name="clip_limit"       value="2.0"/>
+    <param name="n_features"       value="500"/>
+    <param name="debug_viz"        value="$(arg debug_viz)"/>
+  </node>
+
+  <!-- ── Step 8: PID controller (EKF-aware) ─────────────────────────── -->
+  <!-- With EKF running, PID reads /odometry/filtered instead of raw error -->
+  <node pkg="vtr" type="pid_controller.py"
+        name="pid_controller" output="screen">
+    <param name="Kp"              value="$(arg Kp)"/>
+    <param name="Ki"              value="$(arg Ki)"/>
+    <param name="Kd"              value="$(arg Kd)"/>
+    <param name="base_speed"      value="$(arg base_speed)"/>
+    <param name="max_steer"       value="0.6"/>
+    <param name="dead_band_tight" value="0.05"/>
+    <param name="dead_band_wide"  value="0.15"/>
+    <param name="max_integral"    value="0.5"/>
+    <param name="cmd_rate"        value="20.0"/>
+    <param name="timeout"         value="0.5"/>
+    <!-- EKF output topic — PID uses this instead of raw path_error -->
+    <remap from="/geometry/path_error" to="/ekf_path_error"/>
+  </node>
+
+  <!-- ── EKF → PID bridge ───────────────────────────────────────────── -->
+  <!-- Extracts lateral error from /odometry/filtered and publishes
+       as Float32 to /ekf_path_error for the PID controller -->
+  <node pkg="vtr" type="ekf_pid_bridge.py"
+        name="ekf_pid_bridge" output="screen">
+    <param name="w_lateral" value="0.7"/>
+    <param name="w_yaw"     value="0.3"/>
+  </node>
+
+</launch>
