@@ -27,18 +27,6 @@
   <arg name="Kd"          default="0.1"/>
   <arg name="debug_viz"   default="true"/>
 
-  <!-- ── CSI Camera ─────────────────────────────────────────────────── -->
-  <node pkg="gscam" type="gscam" name="csi_camera" output="screen">
-    <env name="GSCAM_CONFIG"
-         value="nvarguscamerasrc sensor-id=0 !
-                video/x-raw(memory:NVMM), width=640, height=480,
-                format=NV12, framerate=30/1 !
-                nvvidconv ! video/x-raw, format=BGRx !
-                videoconvert ! video/x-raw, format=BGR"/>
-    <param name="camera_name"    value="csi_camera"/>
-    <param name="frame_id"       value="camera"/>
-    <param name="image_encoding" value="bgr8"/>
-  </node>
 
   <!-- ── Step 11: Visual odometry bridge ────────────────────────────── -->
   <node pkg="vtr" type="vo_bridge.py"
