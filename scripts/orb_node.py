@@ -305,7 +305,7 @@ class ORBNode(object):
 
         # ── Subscribers ───────────────────────────────────────────────────
         self.sub_img = rospy.Subscriber(
-            '/csi_cam_0/image_raw', Image,
+            '/camera/image_raw', Image,
             self._cb_image, queue_size=1, buff_size=2**24
         )
 
