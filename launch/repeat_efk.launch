@@ -18,7 +18,7 @@
 
 <launch>
 
-  <arg name="goal"        default=""/>
+  <arg name="goal"        default="lab"/>
   <arg name="graph_path"  default="$(env HOME)/vtr_graph"/>
   <arg name="calib_path"  default="$(find vtr)/config/calibration.yaml"/>
   <arg name="base_speed"  default="0.3"/>
