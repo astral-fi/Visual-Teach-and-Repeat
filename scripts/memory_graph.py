@@ -1,6 +1,10 @@
 #!/usr/bin/env python2
 # -*- coding: utf-8 -*-
 """
+=============================================================================
+step5_memory_graph_node.py  —  ROS Melodic Topological Memory Graph
+VT&R Project | Phase 1
+
 ROS NODE NAME : /memory_graph
 SUBSCRIBES    : /keyframe/saved         (vtr/FrameFeatures)  — from step4
 PUBLISHES     : /graph/status           (std_msgs/String)    — JSON status
@@ -10,6 +14,25 @@ PUBLISHES     : /graph/status           (std_msgs/String)    — JSON status
 SERVICES      : /graph/save             (std_srvs/Trigger)   — save to disk
                 /graph/set_goal         (vtr/SetGoal)        — set repeat dest
                 /graph/plan_route       (vtr/PlanRoute)      — BFS route plan
+
+WHAT THIS NODE DOES:
+    Receives quality-scored keyframes from step4 and builds the
+    Topological Memory Graph.
+
+    During TEACH:
+        Each saved keyframe becomes a KeyframeNode.
+        Consecutive nodes are linked by an Edge storing R, t from the
+        Essential Matrix between them.
+        Multi-route: --route and --label params tag nodes per route.
+        Junction: J keypress (Method 2) or overlap detection (Method 3).
+
+    GRAPH STRUCTURE:
+        nodes : list of KeyframeNode
+        edges : list of Edge (parallel, edge[i] links node[i-1] to node[i])
+
+    SAVED TO DISK:
+        graph.pkl        — pickle for fast runtime loading (~2-8 MB)
+        graph_debug.json — human-readable summary (no descriptor bytes)
 
 CUSTOM SERVICES (place in vtr/srv/):
 
@@ -579,7 +602,7 @@ class MemoryGraphNode(object):
             rospy.logwarn("[GRAPH] Empty descriptors — skip")
             return
 
-        desc = np.frombuffer(msg.descriptors_flat,
+        desc = np.array(msg.descriptors_flat,
                         dtype=np.uint8).reshape(-1, 32)
 
         # ── Append overlap check ───────────────────────────────────────

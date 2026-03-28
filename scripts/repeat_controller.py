@@ -58,14 +58,10 @@ import json
 import os
 import pickle
 import time
-import sys
+
 from std_msgs.msg import String
 from std_srvs.srv import Trigger, TriggerResponse
-from memory_graph import TopologicalMemoryGraph, KeyframeNode, Edge
 
-sys.modules['__main__'].TopologicalMemoryGraph = TopologicalMemoryGraph
-sys.modules['__main__'].KeyframeNode = KeyframeNode
-sys.modules['__main__'].Edge = Edge
 
 # ── State machine constants ───────────────────────────────────────────────────
 
@@ -142,14 +138,20 @@ class RepeatControllerNode(object):
         self.pub_rate        = rospy.get_param('~publish_rate',    20.0)
 
         # ── Load graph ────────────────────────────────────────────────────
-        try:
-            self.graph = load_graph(self.graph_path)
-            rospy.loginfo("[REPEAT] Loaded graph: %d nodes  routes=%s",
-                          len(self.graph.nodes),
-                          list(self.graph.routes.keys()))
-        except IOError as e:
-            rospy.logerr("[REPEAT] %s", str(e))
-            rospy.signal_shutdown("Cannot load graph")
+        self.graph = None
+        while self.graph is None and not rospy.is_shutdown():
+            try:
+                self.graph = load_graph(self.graph_path)
+                rospy.loginfo("[REPEAT] Loaded graph: %d nodes  routes=%s",
+                              len(self.graph.nodes),
+                              list(self.graph.routes.keys()))
+            except IOError as e:
+                rospy.logwarn("[REPEAT] %s", str(e))
+                rospy.logwarn("[REPEAT] Waiting for graph.pkl — "
+                              "run teach phase first. Retrying in 5s...")
+                rospy.sleep(5.0)
+
+        if rospy.is_shutdown():
             return
 
         # ── Plan route ────────────────────────────────────────────────────
@@ -159,6 +161,11 @@ class RepeatControllerNode(object):
             if not self.route:
                 rospy.logwarn("[REPEAT] No route to '%s' — using all nodes",
                               self.goal_label)
+        else:
+            rospy.logwarn("[REPEAT] No goal_label set. "
+                          "Pass goal:=<label> to repeat.launch")
+            rospy.logwarn("[REPEAT] Available endpoints: %s",
+                          str(self.graph.list_endpoints()))
 
         if not self.route:
             # Default: traverse all non-pruned nodes in order

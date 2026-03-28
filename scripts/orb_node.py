@@ -394,7 +394,8 @@ class ORBNode(object):
             'entropy'        : round(entropy, 3),
             'clahe_ms'       : round(t_clahe, 2),
             'orb_ms'         : round(t_orb,   2),
-            'total_ms'       : round(t_clahe + t_orb, 2),
+            't_clahe'       : round(t_clahe, 2),
+            't_orb' : round(t_orb, 2)
         }
         self.pub_stats.publish(String(data=json.dumps(stats)))
 

@@ -1,6 +1,10 @@
 #!/usr/bin/env python2
 # -*- coding: utf-8 -*-
 """
+=============================================================================
+step6_teach_logger_node.py  —  ROS Melodic Teach Phase Logger
+VT&R Project | Phase 1
+
 ROS NODE NAME : /teach_logger
 SUBSCRIBES    : /keyframe/saved       (vtr/FrameFeatures) — from step4
                 /graph/node_added     (std_msgs/String)   — from step5
@@ -232,9 +236,9 @@ class TeachLoggerNode(object):
             curr = buttons[idx]
             return curr == 1 and prev == 0
 
-        if rising(10):   # START
+        if rising(7):   # START
             self._do_start()
-        if rising(11):   # SELECT
+        if rising(6):   # SELECT
             self._do_stop()
         if rising(2):   # X — mark junction
             self._do_mark_junction()

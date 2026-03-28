@@ -473,7 +473,7 @@ class GeometryEngineNode(object):
         self.consec_failures  = 0
 
         # ── Subscribers ───────────────────────────────────────────────────
-        rospy.Subscriber('/csi_cam_0/image_raw', Image,
+        rospy.Subscriber('/camera/image_raw', Image,
                          self._cb_image, queue_size=1, buff_size=2**24)
         rospy.Subscriber('/graph/current_node', String,
                          self._cb_node, queue_size=5)
@@ -492,7 +492,6 @@ class GeometryEngineNode(object):
             self.lowe_ratio, self.ransac_thresh,
             self.min_inliers, self.lk_threshold
         )
-
 
     # ── Calibration ───────────────────────────────────────────────────────
 
@@ -530,12 +529,10 @@ class GeometryEngineNode(object):
         try:
             data = json.loads(msg.data)
         except ValueError:
-            rospy.logwarn("[GEO DEBUG] Failed to parse JSON from /graph/current_node!")
             return
 
         flat = data.get('descriptors_flat', [])
         if not flat:
-            rospy.logwarn("[GEO DEBUG] JSON parsed, but 'descriptors_flat' is empty!")
             return
 
         self.current_node_desc     = np.array(
@@ -593,13 +590,14 @@ class GeometryEngineNode(object):
                 self.current_node_desc, kp_node_cv,
                 desc_live,             list(kp_live_cv)
             )
-        rospy.logwarn("Inlier Count" + str(inlier_count))
+
         if success and inlier_count >= self.min_inliers:
             # Good RANSAC result — extract steering signals
             lateral    = float(t[0][0])
             yaw        = float(np.arctan2(R[1, 0], R[0, 0]))
             path_error = self.w_lateral * lateral + self.w_yaw * yaw
             dead_band  = 0.05 if confidence > 0.4 else 0.15
+
             result.success      = True
             result.method       = 'ransac'
             result.inlier_count = inlier_count
@@ -623,7 +621,7 @@ class GeometryEngineNode(object):
         else:
             # ── LK optical flow fallback ───────────────────────────────
             lk_lateral, lk_count = self.lk.compute(gray)
-            rospy.logwarn("lk_count " + str(lk_count))
+
             if lk_count >= 4:
                 result.success      = True
                 result.method       = 'lk'
