@@ -61,7 +61,7 @@ import time
 
 from std_msgs.msg import String
 from std_srvs.srv import Trigger, TriggerResponse
-
+from memory_graph import TopologicalMemoryGraph, Edge, KeyframeNode
 
 # ── State machine constants ───────────────────────────────────────────────────
 
