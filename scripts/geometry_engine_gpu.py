@@ -70,12 +70,7 @@ def check_cuda():
     try:
         n = cv2.cuda.getCudaEnabledDeviceCount()
         if n > 0:
-            dev = cv2.cuda.DeviceInfo(0)
             rospy.loginfo("[GEO-GPU] CUDA available: %d device(s)", n)
-            rospy.loginfo("[GEO-GPU] GPU: %s  compute=%s  memory=%dMB",
-                         dev.name(),
-                         str(dev.majorVersion()) + "." + str(dev.minorVersion()),
-                         dev.totalMemory() // (1024*1024))
             return True
         else:
             rospy.logwarn("[GEO-GPU] CUDA device count = 0")
@@ -187,7 +182,7 @@ class GPUPreprocessor(object):
             gpu_gray = cv2.cuda.cvtColor(gpu_undist, cv2.COLOR_BGR2GRAY)
 
             # CLAHE on GPU
-            gpu_eq = self.clahe_gpu.apply(gpu_gray)
+            gpu_eq = self.clahe_gpu.apply(gpu_gray, cv2.cuda_Stream())
 
             # Download undistorted BGR for debug image only
             bgr_undist = gpu_undist.download()
