@@ -891,37 +891,48 @@ class GPUGeometryEngineNode(object):
 
     def _make_debug_image(self, bgr_undist, result):
         h, w  = bgr_undist.shape[:2]
-        canvas = np.zeros((h, w, 3), dtype=np.uint8)
+        
+        # Make the canvas twice as wide to hold two full-sized images
+        canvas = np.zeros((h, w * 2, 3), dtype=np.uint8)
         canvas[:] = (30, 30, 30)
-        half_w = w // 2
-        canvas[:, half_w:] = bgr_undist[:, :half_w]
-        cv2.line(canvas, (half_w, 0), (half_w, h), (80, 80, 80), 1)
+        
+        # Paste the FULL live frame on the right half
+        canvas[:, w:] = bgr_undist
+        
+        # Draw a line down the middle
+        cv2.line(canvas, (w, 0), (w, h), (80, 80, 80), 1)
+        
+        # Labels
         cv2.putText(canvas, 'node (memory)', (10, 20),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.45, (150,150,150), 1)
-        cv2.putText(canvas, 'live frame', (half_w+10, 20),
+        cv2.putText(canvas, 'live frame', (w + 10, 20),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.45, (150,150,150), 1)
 
+        # Draw the feature matches across the full width
         if result.method == 'ransac' and result.pts_query is not None:
             for pq, pt in zip(result.pts_query, result.pts_train):
-                xq = int(pq[0] * half_w / w)
+                xq = int(pq[0])
                 yq = int(pq[1])
-                xt = int(pt[0] * half_w / w) + half_w
+                xt = int(pt[0]) + w  # Shift right side points by full width 'w'
                 yt = int(pt[1])
                 cv2.line(canvas, (xq,yq), (xt,yt), (0,200,80), 1)
                 cv2.circle(canvas, (xq,yq), 3, (0,200,80), -1)
                 cv2.circle(canvas, (xt,yt), 3, (0,200,80), -1)
 
+        # Draw the HUD background across the whole width at the bottom
         col = (0,200,80) if not result.uncertain else (0,80,220)
-        cv2.rectangle(canvas, (0,h-36), (w,h), (20,20,20), -1)
+        cv2.rectangle(canvas, (0, h-36), (w * 2, h), (20,20,20), -1)
+        
         hud = ("method=%s  inliers=%d  conf=%.2f  "
-               "lat=%+.3f  yaw=%+.1fdeg  err=%+.3f  %.1fms  GPU=%s") % (
+            "lat=%+.3f  yaw=%+.1fdeg  err=%+.3f  %.1fms  GPU=%s") % (
             result.method, result.inlier_count, result.confidence,
             result.lateral, math.degrees(result.yaw),
-            result.path_error, result.process_ms, self.use_gpu
+            result.path_error, result.process_ms, getattr(self, 'use_gpu', False)
         )
         cv2.putText(canvas, hud, (8, h-10),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.40, col, 1)
-        return canvas
+        
+        return canvas 
 
     # ── Spin ──────────────────────────────────────────────────────────────
 
