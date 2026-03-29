@@ -423,9 +423,10 @@ class GPULKFlowEngine(object):
 
     def __init__(self, use_gpu=True):
         self.use_gpu    = use_gpu
-        self.prev_gpu   = None
-        self.prev_cpu   = None
-        self.prev_pts   = None
+        self.prev_gpu      = None
+        self.prev_cpu      = None
+        self.prev_pts_cpu  = None   # CPU LK format: (N, 1, 2)
+        self.prev_pts_gpu  = None   # GPU LK format: (1, N, 2) CV_32FC2
         self.corner_det = cv2.GFTTDetector_create(
             maxCorners   = 150,
             qualityLevel = 0.01,
@@ -457,53 +458,71 @@ class GPULKFlowEngine(object):
             else:
                 pts = np.empty((0, 2), dtype=np.float32)
 
-        self.prev_pts = pts.reshape(-1, 1, 2) if len(pts) > 0 else None
+        # GPU LK requires shape (1, N, 2) CV_32FC2
+        # CPU LK requires shape (N, 1, 2)
+        # Keep both to avoid reshape confusion downstream
+        if len(pts) > 0:
+            self.prev_pts_cpu = pts.reshape(-1, 1, 2)
+            self.prev_pts_gpu = pts.reshape(1, -1, 2).astype(np.float32)
+        else:
+            self.prev_pts_cpu = None
+            self.prev_pts_gpu = None
+
+        # Always keep CPU copy for fallback path
+        gray_cpu = gray.download() if hasattr(gray, 'download') else gray
+        self.prev_cpu = gray_cpu
 
         if self.use_gpu:
-            gray_cpu = gray.download() if hasattr(gray, 'download') else gray
             self.prev_gpu = cv2.cuda_GpuMat()
             self.prev_gpu.upload(gray_cpu)
-        else:
-            self.prev_cpu = gray.download() if hasattr(gray,'download') else gray
 
     def compute(self, gray_curr):
         """Track points. Returns (lateral_error, track_count)."""
-        if self.prev_pts is None or len(self.prev_pts) < 4:
+        # Bug fix: use 'is None' not 'or' — numpy arrays are ambiguous in boolean context
+        if self.prev_pts_cpu is None or len(self.prev_pts_cpu) < 4:
             return 0.0, 0
 
         gray_cpu_curr = gray_curr.download() if hasattr(gray_curr,'download') else gray_curr
 
-        if self.use_gpu and self.prev_gpu is not None:
+        if self.use_gpu and self.prev_gpu is not None and self.prev_pts_gpu is not None:
             try:
                 gpu_curr = cv2.cuda_GpuMat()
                 gpu_curr.upload(gray_cpu_curr)
 
+                # Upload GPU-format points: shape (1, N, 2) CV_32FC2
                 gpu_prev_pts = cv2.cuda_GpuMat()
-                gpu_prev_pts.upload(self.prev_pts)
+                gpu_prev_pts.upload(self.prev_pts_gpu)
 
                 gpu_curr_pts, gpu_status, _ = self.lk_gpu.calc(
                     self.prev_gpu, gpu_curr, gpu_prev_pts, None
                 )
 
-                curr_pts = gpu_curr_pts.download()
-                status   = gpu_status.download()
+                # Download and reshape to standard (N, 1, 2) / (N, 1) for downstream
+                curr_pts = gpu_curr_pts.download().reshape(-1, 1, 2)
+                status   = gpu_status.download().reshape(-1, 1)
 
                 self.prev_gpu = gpu_curr
+                self.prev_cpu = gray_cpu_curr
 
             except Exception as e:
-                rospy.logwarn_throttle(5.0, "[GEO-GPU] GPU LK error: %s", str(e))
+                rospy.logwarn_throttle(5.0,
+                    "[GEO-GPU] GPU LK error: %s — CPU fallback", str(e))
+                # CPU fallback — prev_cpu is always kept up to date
+                prev_ref = self.prev_cpu if self.prev_cpu is not None else gray_cpu_curr
                 curr_pts, status, _ = cv2.calcOpticalFlowPyrLK(
-                    self.prev_cpu or gray_cpu_curr,
-                    gray_cpu_curr, self.prev_pts, None,
+                    prev_ref, gray_cpu_curr,
+                    self.prev_pts_cpu, None,
                     winSize=LK_WIN_SIZE, maxLevel=LK_MAX_LEVEL,
                     criteria=LK_CRITERIA
                 )
                 self.prev_cpu = gray_cpu_curr
 
         else:
+            # Full CPU path — prev_cpu always valid (set in seed())
+            prev_ref = self.prev_cpu if self.prev_cpu is not None else gray_cpu_curr
             curr_pts, status, _ = cv2.calcOpticalFlowPyrLK(
-                self.prev_cpu or gray_cpu_curr,
-                gray_cpu_curr, self.prev_pts, None,
+                prev_ref, gray_cpu_curr,
+                self.prev_pts_cpu, None,
                 winSize=LK_WIN_SIZE, maxLevel=LK_MAX_LEVEL,
                 criteria=LK_CRITERIA
             )
@@ -516,12 +535,14 @@ class GPULKFlowEngine(object):
         if good_mask.sum() < 4:
             return 0.0, 0
 
-        prev_good = self.prev_pts[good_mask].reshape(-1, 2)
+        prev_good = self.prev_pts_cpu[good_mask].reshape(-1, 2)
         curr_good = curr_pts[good_mask].reshape(-1, 2)
         flow      = curr_good - prev_good
         lateral   = float(-np.median(flow[:, 0]))
 
-        self.prev_pts = curr_good.reshape(-1, 1, 2)
+        # Update both CPU and GPU point formats for next frame
+        self.prev_pts_cpu = curr_good.reshape(-1, 1, 2)
+        self.prev_pts_gpu = curr_good.reshape(1, -1, 2).astype(np.float32)
         return lateral, int(good_mask.sum())
 
 
