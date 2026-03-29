@@ -58,7 +58,7 @@
   </node>
 
   <!-- ── Step 7: Geometry engine ────────────────────────────────────── -->
-  <node pkg="vtr" type="geometry_engine.py"
+  <node pkg="vtr" type="geometry_engine_gpu.py"
         name="geometry_engine" output="screen">
     <param name="calib_path"       value="$(arg calib_path)"/>
     <param name="lowe_ratio"       value="0.75"/>
