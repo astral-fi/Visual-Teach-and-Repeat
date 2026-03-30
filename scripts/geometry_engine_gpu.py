@@ -553,6 +553,7 @@ class GeometryResult(object):
         self.t            = None
         self.lateral      = 0.0
         self.yaw          = 0.0
+        self.forward      = 1.0
         self.path_error   = 0.0
         self.dead_band    = 0.15
         self.uncertain    = True
@@ -568,6 +569,7 @@ class GeometryResult(object):
             'confidence'   : round(self.confidence,  3),
             'lateral'      : round(self.lateral,     4),
             'yaw_deg'      : round(math.degrees(self.yaw), 2),
+            'forward'      : round(self.forward,     4),
             'path_error'   : round(self.path_error,  4),
             'dead_band'    : round(self.dead_band,   3),
             'uncertain'    : self.uncertain,
@@ -793,8 +795,9 @@ class GPUGeometryEngineNode(object):
         )
 
         if success:
-            lateral    = float(t[0][0])
-            yaw        = float(np.arctan2(R[1, 0], R[0, 0]))
+            lateral    = float(-t[0][0])
+            yaw        = float(-np.arctan2(R[0, 2], R[2, 2]))
+            forward    = float(t[2][0])
             path_error = self.w_lateral * lateral + self.w_yaw * yaw
             dead_band  = 0.05 if confidence > 0.4 else 0.15
 
@@ -806,6 +809,7 @@ class GPUGeometryEngineNode(object):
             result.t            = t
             result.lateral      = lateral
             result.yaw          = yaw
+            result.forward      = forward
             result.path_error   = path_error
             result.dead_band    = dead_band
             result.uncertain    = confidence < 0.4 or inlier_count < 20
