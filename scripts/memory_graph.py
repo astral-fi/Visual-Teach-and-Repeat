@@ -168,9 +168,9 @@ class Edge(object):
             'dst'         : self.dst_id,
             'match_count' : self.match_count,
             'confidence'  : round(self.confidence, 3),
-            'lateral'     : round(float(self.t[0][0]), 4),
+            'lateral'     : round(float(-self.t[0][0]), 4),
             'yaw_deg'     : round(float(np.degrees(
-                np.arctan2(self.R[1, 0], self.R[0, 0]))), 2),
+                -np.arctan2(self.R[0, 2], self.R[2, 2]))), 2),
         }
 
 

@@ -426,6 +426,7 @@ class RepeatControllerNode(object):
         self.last_inliers_curr = inliers
         self.last_confidence   = data.get('confidence', 0.0)
         self.last_method       = data.get('method', 'none')
+        self.last_forward      = data.get('forward', 1.0)
         self.total_inliers    += inliers
 
         # ── Endpoint detection ─────────────────────────────────────────
@@ -460,21 +461,10 @@ class RepeatControllerNode(object):
                 self.state = STATE_RUNNING
 
         # ── Goal List pointer advance ──────────────────────────────────
-        # We do not have a separate inlier count for next node here
-        # because the geometry engine only matches one node at a time.
-        # The advance decision uses the edge confidence as a proxy:
-        # when confidence is high AND the robot has been at this node
-        # long enough (min 3 good frames), check if we should advance.
+        # Advance when the camera physically reaches the target node
+        # forward < 0.2 indicates the target is very close or passed
         #
-        # A more complete implementation would publish next_node to the
-        # geometry engine and receive dual inlier counts. For Phase 2,
-        # we use a simpler but robust rule:
-        #   Advance when: inliers(curr) >= min_inliers AND
-        #                 edge confidence of NEXT edge is > 0.3 AND
-        #                 advance_count >= advance_votes
-        #
-        self.advance_count += 1
-        if self.advance_count >= self.advance_votes:
+        if getattr(self, 'last_forward', 1.0) < 0.2:
             self._try_advance()
 
     # ── Pointer advance ───────────────────────────────────────────────────
@@ -482,7 +472,7 @@ class RepeatControllerNode(object):
     def _try_advance(self):
         """
         Attempt to advance pointer to the next node.
-        Called when inliers have been good for advance_votes frames.
+        Called when physical distance drops below threshold.
         """
         self.advance_count = 0
 
@@ -497,18 +487,8 @@ class RepeatControllerNode(object):
             self._skip_pruned()
             return
 
-        # Check edge quality to next node
-        next_idx = self.route[self.pointer + 1]
-        edge = self.graph.edges[next_idx] if next_idx < len(self.graph.edges) else None
-
-        # Advance if edge exists and has reasonable confidence
-        # Or advance unconditionally after enough good frames
-        if edge is not None and edge.match_count >= self.min_inliers:
-            self._advance_pointer()
-        elif edge is None:
-            # No edge — advance anyway (first node has no incoming edge)
-            self._advance_pointer()
-        # else: weak edge — wait for more good frames
+        # Advance pointer unconditionally since we physically reached it
+        self._advance_pointer()
 
     def _advance_pointer(self):
         """Move pointer to next node and publish new targets."""

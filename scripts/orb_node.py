@@ -333,6 +333,11 @@ class ORBNode(object):
         # Mask is built lazily on first frame (needs image size)
         self._feat_mask   = None
 
+        # ── Keyframe save path ────────────────────────────────────────────
+        self.save_path = os.path.expanduser(rospy.get_param('~save_path', '~/vtr_graph/keyframes'))
+        if not os.path.exists(self.save_path):
+            os.makedirs(self.save_path)
+
         # ── Calibration ───────────────────────────────────────────────────
         K, D = load_calibration(calib_path)
 
@@ -353,11 +358,16 @@ class ORBNode(object):
         self.frame_n    = 0
         self.t_last_pub = 0.0
         self.min_dt     = 1.0 / self.max_hz
+        self.image_buffer = {}  # timestamp -> BGR image
 
         # ── Subscribers ───────────────────────────────────────────────────
         self.sub_img = rospy.Subscriber(
             '/camera/image_raw', Image,
             self._cb_image, queue_size=1, buff_size=2**24
+        )
+        self.sub_saved = rospy.Subscriber(
+            '/keyframe/saved', FrameFeatures,
+            self._cb_kf_saved, queue_size=5
         )
 
         # ── Publishers ────────────────────────────────────────────────────
@@ -392,8 +402,16 @@ class ORBNode(object):
         except CvBridgeError as e:
             rospy.logerr("[ORB] CvBridge error: %s", str(e))
             return
-
         h, w = bgr.shape[:2]
+
+        # ── Cache original image locally (max 30 frames) ────────────────
+        ts = msg.header.stamp.to_sec()
+        self.image_buffer[ts] = bgr.copy()
+        
+        # Keep buffer small (approx 1-2 seconds of data)
+        if len(self.image_buffer) > 30:
+            oldest_ts = min(self.image_buffer.keys())
+            del self.image_buffer[oldest_ts]
 
         # ── CLAHE preprocessing ────────────────────────────────────────
         t0 = time.time()
@@ -500,6 +518,23 @@ class ORBNode(object):
         self.prev_desc = descs
         self.t_last_pub = now
         self.frame_n   += 1
+
+    # ── Keyframe save callback ────────────────────────────────────────────
+
+    def _cb_kf_saved(self, msg):
+        """
+        Called when the scoring node approves a keyframe candidates.
+        Fetches the matching image from the ring buffer and writes to disk.
+        """
+        ts = msg.timestamp
+        if ts in self.image_buffer:
+            filepath = os.path.join(self.save_path, 'kf_%.6f.jpg' % ts)
+            cv2.imwrite(filepath, self.image_buffer[ts])
+            rospy.loginfo("[ORB] Saved keyframe image: %s", filepath)
+            # Remove from buffer to free memory early
+            del self.image_buffer[ts]
+        else:
+            rospy.logwarn("[ORB] Approved keyframe image %.6f not in buffer! Buffer size: %d", ts, len(self.image_buffer))
 
     # ── Debug image builder ────────────────────────────────────────────────
 
