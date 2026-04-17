@@ -85,7 +85,7 @@ class KeyframeNode(object):
     One node in the topological memory graph.
     Stores visual descriptors + graph metadata.
     Raw pixel data is never stored.
-    Typical size: ~16 KB per node (500 keypoints x 32 bytes descriptors).
+    Typical size: ~128 KB per node (500 keypoints x 64 x 4 bytes descriptors).
     """
 
     def __init__(self, node_id, route_id, timestamp,
@@ -103,7 +103,7 @@ class KeyframeNode(object):
         self.keypoints_angle  = keypoints_angle
         self.keypoints_size   = keypoints_size
         self.keypoints_octave = keypoints_octave
-        self.descriptors      = descriptors        # np.ndarray (N,32) uint8
+        self.descriptors      = descriptors        # np.ndarray (N,64) float32
 
         # Quality metadata
         self.quality_score    = quality_score
@@ -352,7 +352,7 @@ class EdgeComputer(object):
     def __init__(self, K, min_inliers=10):
         self.K           = K
         self.min_inliers = min_inliers
-        self.matcher     = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=False)
+        self.matcher     = cv2.BFMatcher(cv2.NORM_L2, crossCheck=False)
 
     def compute(self, node_prev, node_curr):
         desc_a = node_prev.descriptors
@@ -379,17 +379,8 @@ class EdgeComputer(object):
         if len(good) < self.min_inliers:
             return None
 
-        # Stage 2: orientation histogram filter
-        if len(good) > 8:
-            deltas  = np.array([kp_a[m.queryIdx].angle - kp_b[m.trainIdx].angle
-                                for m in good])
-            hist, _ = np.histogram(deltas, bins=30, range=(-180.0, 180.0))
-            top_idx = set(np.argsort(hist)[-3:].tolist())
-            bin_w   = 360.0 / 30
-            filtered = [m for m, d in zip(good, deltas)
-                        if max(0, min(int((d + 180.0) / bin_w), 29)) in top_idx]
-            if len(filtered) >= 8:
-                good = filtered
+        # NOTE: Orientation histogram filter removed — XFeat keypoints
+        # have no orientation angle, so all deltas would be zero.
 
         if len(good) < self.min_inliers:
             return None
@@ -442,7 +433,7 @@ class OverlapDetector(object):
         self.threshold  = overlap_threshold
         self.votes_needed = overlap_votes
         self.vote_counts  = {}
-        self.matcher    = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=False)
+        self.matcher    = cv2.BFMatcher(cv2.NORM_L2, crossCheck=False)
 
     def check(self, desc_new, kp_new):
         """
@@ -602,8 +593,8 @@ class MemoryGraphNode(object):
             rospy.logwarn("[GRAPH] Empty descriptors — skip")
             return
 
-        desc = np.frombuffer(msg.descriptors_flat,
-                        dtype=np.uint8).reshape(-1, 32)
+        desc = np.array(msg.descriptors_flat,
+                       dtype=np.float32).reshape(-1, 64)
 
         # ── Append overlap check ───────────────────────────────────────
         if self.overlap_det is not None:

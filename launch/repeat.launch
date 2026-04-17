@@ -23,21 +23,48 @@
 
 <launch>
 
-  <!-- ── Arguments ──────────────────────────────────────────────────── -->
-  <arg name="goal"         default=""/>
-  <arg name="graph_path"   default="$(env HOME)/vtr_graph"/>
-  <arg name="calib_path"   default="$(find vtr)/config/calibration.yaml"/>
-  <arg name="base_speed"   default="0.3"/>
-  <arg name="Kp"           default="0.5"/>
-  <arg name="Ki"           default="0.02"/>
-  <arg name="Kd"           default="0.1"/>
-  <arg name="debug_viz"    default="true"/>
+  <!-- ── Arguments ─────────────────────────────────────────────── -->
+  <arg name="goal"            default=""/>
+  <arg name="graph_path"      default="$(env HOME)/vtr_graph"/>
+  <!-- NEW: VO waypoints from teach phase -->
+  <arg name="waypoints_pkl"   default="$(env HOME)/waypoints.pkl"/>
+  <arg name="calib_path"      default="$(find vtr)/config/calibration.yaml"/>
+  <arg name="base_speed"      default="0.3"/>
+  <arg name="Kp"              default="0.8"/>
+  <arg name="Ki"              default="0.02"/>
+  <arg name="Kd"              default="0.1"/>
+  <!-- NEW: ORB match score threshold for checkpoint snapping -->
+  <arg name="orb_threshold"   default="0.75"/>
+  <arg name="debug_viz"       default="true"/>
 
+
+  <!-- NEW: LK optical flow node — primary navigation backbone -->
+  <node pkg="vtr" type="lk_flow_node.py"
+        name="lk_flow_node" output="screen">
+    <param name="max_corners"     value="200"/>
+    <param name="quality_level"   value="0.01"/>
+    <param name="min_dist"        value="10.0"/>
+    <param name="win_size"        value="21"/>
+    <param name="max_level"       value="3"/>
+    <param name="redetect_thresh" value="20"/>
+  </node>
+
+  <!-- NEW: Fusion node — ORB checkpoint arbitration -->
+  <node pkg="vtr" type="fusion_node.py"
+        name="fusion_node" output="screen">
+    <!-- Expose ORB_THRESHOLD as a launch arg so it can be tuned at launch time -->
+    <param name="orb_threshold"   value="$(arg orb_threshold)"/>
+    <param name="snap_cooldown_s" value="1.0"/>
+  </node>
 
  <node pkg="vtr" type="repeat_controller.py"
         name="repeat_controller" output="screen">
     <param name="graph_path"      value="$(arg graph_path)"/>
+    <!-- NEW: VO waypoints from teach phase -->
+    <param name="waypoints_pkl"   value="$(arg waypoints_pkl)"/>
     <param name="goal_label"      value="$(arg goal)"/>
+    <!-- NEW: P-gain for flow-error steering correction -->
+    <param name="Kp"              value="$(arg Kp)"/>
     <param name="min_inliers"     value="15"/>
     <param name="advance_votes"   value="2"/>
     <param name="failure_timeout" value="3.0"/>

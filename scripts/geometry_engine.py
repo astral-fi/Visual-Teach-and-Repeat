@@ -51,6 +51,11 @@ PARAMS:
     ~clip_limit       (float, default=2.0)    CLAHE clip limit
     ~n_features       (int,   default=500)    ORB max features
     ~debug_viz        (bool,  default=True)   publish debug image
+    ~top_crop         (float, default=0.20)   fraction of height to mask at top (ceiling)
+    ~bottom_crop      (float, default=0.25)   fraction of height to mask at bottom (floor)
+    ~grid_cols        (int,   default=6)      spatial binning columns (0 = disabled)
+    ~grid_rows        (int,   default=3)      spatial binning rows    (0 = disabled)
+    ~kp_per_cell      (int,   default=12)     max keypoints kept per grid cell
 =============================================================================
 """
 
@@ -79,6 +84,13 @@ W_YAW            = 0.3
 N_FEATURES       = 500
 CLIP_LIMIT       = 2.0
 TILE_SIZE        = 8
+
+# Feature distribution control
+TOP_CROP     = 0.20   # mask ceiling  (top 20% of rows are sky/ceiling for a rover)
+BOTTOM_CROP  = 0.25   # mask floor    (bottom 25% is featureless ground)
+GRID_COLS    = 6      # spatial binning: horizontal cells
+GRID_ROWS    = 3      # spatial binning: vertical cells inside the active band
+KP_PER_CELL  = 12     # max keypoints kept per cell after Harris-score sorting
 
 # LK optical flow parameters
 LK_WIN_SIZE      = (21, 21)
@@ -434,6 +446,13 @@ class GeometryEngineNode(object):
         self.clip_limit   = rospy.get_param('~clip_limit',       CLIP_LIMIT)
         self.n_features   = rospy.get_param('~n_features',       N_FEATURES)
         self.debug        = rospy.get_param('~debug_viz',        True)
+        self.top_crop     = rospy.get_param('~top_crop',         TOP_CROP)
+        self.bottom_crop  = rospy.get_param('~bottom_crop',      BOTTOM_CROP)
+        self.grid_cols    = rospy.get_param('~grid_cols',         GRID_COLS)
+        self.grid_rows    = rospy.get_param('~grid_rows',         GRID_ROWS)
+        self.kp_per_cell  = rospy.get_param('~kp_per_cell',       KP_PER_CELL)
+        # Feature mask built lazily on first frame (needs image size)
+        self._feat_mask   = None
 
         # ── Calibration ───────────────────────────────────────────────────
         self.K, self.D = self._load_calibration(calib_path)
@@ -566,9 +585,33 @@ class GeometryEngineNode(object):
 
         # CLAHE preprocessing
         gray, bgr_undist = self.clahe.process(bgr)
+        h_img, w_img = bgr.shape[:2]
 
-        # ORB extraction on live frame
-        kp_live_cv, desc_live = self.orb.detectAndCompute(gray, None)
+        # ── Build horizontal band mask (lazy, once per resolution) ─────────
+        # Strips featureless ceiling (top top_crop%) and floor (bottom bottom_crop%)
+        if self._feat_mask is None or self._feat_mask.shape != (h_img, w_img):
+            self._feat_mask = np.zeros((h_img, w_img), dtype=np.uint8)
+            y_lo = int(h_img * self.top_crop)
+            y_hi = int(h_img * (1.0 - self.bottom_crop))
+            y_lo = max(0, min(y_lo, h_img - 1))
+            y_hi = max(y_lo + 1, min(y_hi, h_img))
+            self._feat_mask[y_lo:y_hi, :] = 255
+            rospy.loginfo(
+                "[GEO] Feature mask: rows %d-%d of %d "
+                "(ceiling=%.0f%%  floor=%.0f%%)",
+                y_lo, y_hi, h_img,
+                self.top_crop * 100, self.bottom_crop * 100
+            )
+
+        # ── ORB extraction on live frame (band-masked) ─────────────────────
+        kp_live_cv, desc_live = self.orb.detectAndCompute(gray, self._feat_mask)
+
+        # ── Grid spatial subsampling ───────────────────────────────────────
+        if desc_live is not None and len(kp_live_cv) > 0:
+            kp_live_cv, desc_live = self._grid_subsample(
+                list(kp_live_cv), desc_live, h_img, w_img
+            )
+
         if desc_live is None or len(kp_live_cv) == 0:
             self._publish_failure(result, t0)
             return
@@ -673,6 +716,39 @@ class GeometryEngineNode(object):
                 result.inlier_count, result.confidence,
                 result.path_error, result.process_ms
             )
+
+    # ── Grid spatial subsampling helper ──────────────────────────────────
+
+    def _grid_subsample(self, kps, descs, img_h, img_w):
+        """
+        Spatial binning: keep only the top-kp_per_cell highest-Harris
+        keypoints in each (grid_rows x grid_cols) cell.
+        Prevents all features clustering on one high-texture patch.
+        Returns (kps_list, descs_ndarray).
+        """
+        if self.grid_rows <= 0 or self.grid_cols <= 0 or self.kp_per_cell <= 0:
+            return kps, descs
+        if len(kps) == 0:
+            return kps, descs
+
+        cell_h = float(img_h) / self.grid_rows
+        cell_w = float(img_w) / self.grid_cols
+        cells  = {}
+        for idx, kp in enumerate(kps):
+            r = int(min(kp.pt[1] / cell_h, self.grid_rows - 1))
+            c = int(min(kp.pt[0] / cell_w, self.grid_cols - 1))
+            key = (r, c)
+            if key not in cells:
+                cells[key] = []
+            cells[key].append(idx)
+
+        kept = []
+        for indices in cells.values():
+            indices.sort(key=lambda i: -kps[i].response)
+            kept.extend(indices[:self.kp_per_cell])
+
+        kept.sort()   # preserve spatial order
+        return [kps[i] for i in kept], descs[kept]
 
     # ── Failure handling ──────────────────────────────────────────────────
 

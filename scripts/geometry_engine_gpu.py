@@ -93,6 +93,13 @@ N_FEATURES       = 250    # reduced from 500 — GPU ORB at 250 is faster than C
 CLIP_LIMIT       = 2.0
 TILE_SIZE        = 8
 
+# Feature distribution control
+TOP_CROP     = 0.20   # mask ceiling  (top 20% of rows are sky/ceiling for a rover)
+BOTTOM_CROP  = 0.25   # mask floor    (bottom 25% is featureless ground)
+GRID_COLS    = 6      # spatial binning: horizontal cells
+GRID_ROWS    = 3      # spatial binning: vertical cells inside the active band
+KP_PER_CELL  = 12     # max keypoints kept per cell after Harris-score sorting
+
 LK_WIN_SIZE  = (21, 21)
 LK_MAX_LEVEL = 3
 LK_CRITERIA  = (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 30, 0.01)
@@ -239,18 +246,24 @@ class GPUORBExtractor(object):
             )
             rospy.loginfo("[GEO-GPU] CPU ORB fallback  nfeatures=%d", n_features)
 
-    def detect_and_compute(self, img):
+    def detect_and_compute(self, img, mask_cpu=None):
         """
         Args:
-            img: cv2.cuda_GpuMat (if GPU) or np.ndarray (if CPU fallback)
+            img:      cv2.cuda_GpuMat (if GPU) or np.ndarray (if CPU fallback)
+            mask_cpu: optional uint8 np.ndarray (HxW), 255=detect, 0=ignore
         Returns:
             (keypoints list, descriptors)
             descriptors is cv2.cuda_GpuMat if GPU, np.ndarray if CPU
         """
         if self.use_gpu:
             try:
+                # GPU ORB mask must be GpuMat CV_8UC1
+                gpu_mask = None
+                if mask_cpu is not None:
+                    gpu_mask = cv2.cuda_GpuMat()
+                    gpu_mask.upload(mask_cpu)
                 # GPU ORB returns GpuMat keypoints and descriptors
-                gpu_kp, gpu_desc = self.orb_gpu.detectAndComputeAsync(img, None)
+                gpu_kp, gpu_desc = self.orb_gpu.detectAndComputeAsync(img, gpu_mask)
                 # Convert GPU keypoints to CPU list
                 kp = self.orb_gpu.convert(gpu_kp)
                 return kp, gpu_desc   # gpu_desc stays on GPU for BFMatcher
@@ -258,13 +271,45 @@ class GPUORBExtractor(object):
                 rospy.logwarn_throttle(5.0, "[GEO-GPU] GPU ORB error: %s", str(e))
                 # Download and use CPU
                 img_cpu = img.download() if hasattr(img, 'download') else img
-                kp, desc = self.orb_cpu.detectAndCompute(img_cpu, None)
+                kp, desc = self.orb_cpu.detectAndCompute(img_cpu, mask_cpu)
                 return kp, desc
 
         else:
             img_cpu = img.download() if hasattr(img, 'download') else img
-            kp, desc = self.orb_cpu.detectAndCompute(img_cpu, None)
+            kp, desc = self.orb_cpu.detectAndCompute(img_cpu, mask_cpu)
             return kp, desc
+
+    @staticmethod
+    def grid_subsample(kps, descs_cpu, img_h, img_w,
+                       grid_rows, grid_cols, kp_per_cell):
+        """
+        Spatial binning: keep top-kp_per_cell highest-Harris keypoints per cell.
+        descs_cpu must be np.ndarray (N, 32) — download from GPU before calling.
+        Returns (kps_out list, descs_out np.ndarray).
+        """
+        if grid_rows <= 0 or grid_cols <= 0 or kp_per_cell <= 0:
+            return kps, descs_cpu
+        if len(kps) == 0:
+            return kps, descs_cpu
+
+        cell_h = float(img_h) / grid_rows
+        cell_w = float(img_w) / grid_cols
+        cells  = {}
+        for idx, kp in enumerate(kps):
+            r = int(min(kp.pt[1] / cell_h, grid_rows - 1))
+            c = int(min(kp.pt[0] / cell_w, grid_cols - 1))
+            key = (r, c)
+            if key not in cells:
+                cells[key] = []
+            cells[key].append(idx)
+
+        kept = []
+        for indices in cells.values():
+            indices.sort(key=lambda i: -kps[i].response)
+            kept.extend(indices[:kp_per_cell])
+
+        kept.sort()
+        return [kps[i] for i in kept], descs_cpu[kept]
 
 
 # ── GPU BFMatcher ─────────────────────────────────────────────────────────────
@@ -594,6 +639,13 @@ class GPUGeometryEngineNode(object):
         self.clip_limit   = rospy.get_param('~clip_limit',       CLIP_LIMIT)
         self.n_features   = rospy.get_param('~n_features',       N_FEATURES)
         self.debug        = rospy.get_param('~debug_viz',        False)
+        self.top_crop     = rospy.get_param('~top_crop',         TOP_CROP)
+        self.bottom_crop  = rospy.get_param('~bottom_crop',      BOTTOM_CROP)
+        self.grid_cols    = rospy.get_param('~grid_cols',         GRID_COLS)
+        self.grid_rows    = rospy.get_param('~grid_rows',         GRID_ROWS)
+        self.kp_per_cell  = rospy.get_param('~kp_per_cell',       KP_PER_CELL)
+        # Live-frame mask built lazily on first frame
+        self._feat_mask   = None
 
         # ── CUDA check ────────────────────────────────────────────────────
         self.use_gpu = check_cuda()
@@ -722,9 +774,45 @@ class GPUGeometryEngineNode(object):
 
         # ── GPU: undistort → BGR2GRAY → CLAHE ─────────────────────────
         gpu_eq, bgr_undist = self.preprocessor.process(bgr)
+        h_img, w_img = bgr.shape[:2]
 
-        # ── GPU: ORB extraction ────────────────────────────────────────
-        kp_live, desc_live = self.orb_extractor.detect_and_compute(gpu_eq)
+        # ── Build horizontal band mask (lazy, once per resolution) ─────
+        # Strips featureless ceiling (top top_crop%) and floor (bottom bottom_crop%)
+        if self._feat_mask is None or self._feat_mask.shape != (h_img, w_img):
+            self._feat_mask = np.zeros((h_img, w_img), dtype=np.uint8)
+            y_lo = int(h_img * self.top_crop)
+            y_hi = int(h_img * (1.0 - self.bottom_crop))
+            y_lo = max(0, min(y_lo, h_img - 1))
+            y_hi = max(y_lo + 1, min(y_hi, h_img))
+            self._feat_mask[y_lo:y_hi, :] = 255
+            rospy.loginfo(
+                "[GEO-GPU] Feature mask: rows %d-%d of %d "
+                "(ceiling=%.0f%%  floor=%.0f%%)",
+                y_lo, y_hi, h_img,
+                self.top_crop * 100, self.bottom_crop * 100
+            )
+
+        # ── GPU: ORB extraction (with band mask) ──────────────────────
+        kp_live, desc_live = self.orb_extractor.detect_and_compute(
+            gpu_eq, mask_cpu=self._feat_mask
+        )
+
+        # ── Grid spatial subsampling (CPU — tiny list op) ─────────────
+        if len(kp_live) > 0 and desc_live is not None:
+            desc_live_np = (
+                desc_live.download() if hasattr(desc_live, 'download') else desc_live
+            )
+            kp_live, desc_live_np = GPUORBExtractor.grid_subsample(
+                kp_live, desc_live_np, h_img, w_img,
+                self.grid_rows, self.grid_cols, self.kp_per_cell
+            )
+            # Re-upload filtered descriptors so GPU BFMatcher can use them
+            if self.use_gpu and len(kp_live) > 0:
+                desc_live_gpu = cv2.cuda_GpuMat()
+                desc_live_gpu.upload(desc_live_np)
+                desc_live = desc_live_gpu
+            else:
+                desc_live = desc_live_np
 
         if desc_live is None or len(kp_live) == 0:
             self._publish_failure(result, t0)

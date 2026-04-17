@@ -138,9 +138,9 @@ def score_novelty(desc_curr, desc_prev,
     """
     Signal 3 — how different is this frame from the last saved keyframe.
 
-    Runs BFMatcher + ratio test between current and previous saved
-    descriptors. Returns 1 - match_ratio where match_ratio is the
-    fraction of current descriptors that found a good match.
+    Uses L2 nearest-neighbour matching on float32 XFeat descriptors
+    with a ratio test. Returns 1 - match_ratio where match_ratio is
+    the fraction of current descriptors that found a good match.
 
     High similarity (match_ratio=0.9) → novelty=0.1 → do NOT save
     Low similarity  (match_ratio=0.2) → novelty=0.8 → good candidate
@@ -153,25 +153,27 @@ def score_novelty(desc_curr, desc_prev,
         # No previous frame to compare against — treat as novel
         return 1.0, 0.0
 
-    matcher = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=False)
-
     try:
-        pairs = matcher.knnMatch(desc_curr, desc_prev, k=2)
-    except cv2.error:
+        # L2 distance matrix (N_curr, N_prev)
+        a2 = np.sum(desc_curr**2, axis=1, keepdims=True)     # (N,1)
+        b2 = np.sum(desc_prev**2, axis=1, keepdims=True).T   # (1,M)
+        ab = desc_curr.dot(desc_prev.T)                       # (N,M)
+        dist = np.sqrt(np.maximum(a2 + b2 - 2*ab, 0.0))      # (N,M)
+
+        if dist.shape[1] < 2:
+            return 1.0, 0.0
+
+        # Nearest and second-nearest
+        d_sorted = np.partition(dist, 1, axis=1)
+        d1 = d_sorted[:, 0]
+        d2 = d_sorted[:, 1]
+
+        # Ratio test
+        n_good = int(np.sum((d1 < ratio * d2) & (d2 > 1e-6)))
+    except Exception:
         return 1.0, 0.0
 
-    good = []
-    for pair in pairs:
-        if len(pair) == 2:
-            m, n = pair
-            if m.distance < ratio * n.distance:
-                good.append(m)
-
-    # Orientation histogram filter on similarity matches
-    if len(good) > 8 and kp_angle_curr and kp_angle_prev:
-        good = _orientation_filter(good, kp_angle_curr, kp_angle_prev)
-
-    match_ratio   = float(len(good)) / float(len(desc_curr))
+    match_ratio   = float(n_good) / float(len(desc_curr))
     novelty_score = float(1.0 - match_ratio)
 
     return novelty_score, match_ratio
@@ -298,8 +300,8 @@ class KeyframeScorerNode(object):
 
         # ── Reconstruct descriptors and keypoint angles ────────────────
         if len(msg.descriptors_flat) > 0:
-            desc = np.frombuffer(msg.descriptors_flat,
-                            dtype=np.uint8).reshape(-1, 32)
+            desc = np.array(msg.descriptors_flat,
+                           dtype=np.float32).reshape(-1, 64)
         else:
             desc = None
 

@@ -3,47 +3,53 @@
 """
 =============================================================================
 step9_repeat_controller_node.py  —  ROS Melodic Repeat Phase Controller
-VT&R Project | Phase 2
+VT&R Project | Phase 2  (VO-primary, VTR-assisted extension)
 
 ROS NODE NAME : /repeat_controller
-SUBSCRIBES    : /geometry/result       (std_msgs/String)   — inlier counts
-PUBLISHES     : /graph/current_node    (std_msgs/String)   — target for geo engine
-                /graph/next_node       (std_msgs/String)   — i+1 for Goal List
-                /repeat/state          (std_msgs/String)   — state for PID
-                /repeat/stats          (std_msgs/String)   — run statistics
+SUBSCRIBES    : /geometry/result       (std_msgs/String)    — inlier counts
+                /camera/image_raw      (sensor_msgs/Image)  — NEW: LK flow
+                /vtr/live_flow         (geometry_msgs/Vector3) — from lk_flow_node
+                /vtr/fusion_state      (std_msgs/String)    — from fusion_node
+PUBLISHES     : /graph/current_node   (std_msgs/String)    — target for geo engine
+                /graph/next_node       (std_msgs/String)    — i+1 for Goal List
+                /repeat/state          (std_msgs/String)    — state for PID
+                /repeat/stats          (std_msgs/String)    — run statistics
+                /repeat/cmd_steer      (std_msgs/Float32)   — NEW: flow-corrected steer
 
 SERVICES      : /repeat/start          (std_srvs/Trigger)  — begin repeat run
                 /repeat/stop           (std_srvs/Trigger)  — emergency stop
 
 WHAT THIS NODE DOES:
-    Brain of the Repeat phase. Manages the node pointer across the
-    pre-planned route from the memory graph.
+    Brain of the Repeat phase.  Extends the original graph-based pointer
+    controller with a VO-primary flow backbone:
 
     On startup:
-        Loads graph.pkl from disk.
+        Loads graph.pkl from disk (existing).
+        Loads waypoints.pkl — list of WaypointRecord from Teach phase (NEW).
         Runs BFS to plan the route to the configured goal label.
-        Publishes node 0 as the current target → geometry engine starts matching.
+        Publishes node 0 as the current target.
 
-    Every geometry result received:
-        Reads inlier count for current node i.
-        Reads inlier count for next node i+1 (Goal List — Paper 2).
-        If inliers(i+1) > inliers(i) for 2 consecutive frames → advance pointer.
-        If inliers(i) < MIN_INLIERS for FAILURE_TIMEOUT seconds → failure path.
+    Every live flow sample received (NEW):
+        Accumulates live dx, dy, dtheta.
+        Computes P-gain steering correction:
+            correction = Kp * (recorded_flow_dx - live_flow_dx)
+        Publishes corrected steering command to /repeat/cmd_steer.
+        Advances waypoint pointer when accumulated flow magnitude
+            >= recorded waypoint flow_magnitude.
 
-    Failure path (from Paper 1 dynamic pruning):
-        Mark node i as pruned.
-        Jump pointer to i+1, attempt matching.
-        If still failing, jump to i+2 (max LOOKAHEAD jumps).
-        If all lookahead nodes fail → publish FAILURE state → PID stops motors.
+    Fusion state (NEW):
+        If fusion_node publishes 'checkpoint_snap', resets the drift
+        accumulator to bring localisation back in sync with the graph.
 
-    Endpoint detection:
-        When pointer reaches a node with is_endpoint=True AND inliers
-        stay above MIN_INLIERS for ENDPOINT_HOLD seconds → COMPLETE.
+    ORB geometry result (existing):
+        Kept for fallback inlier counting and endpoint detection.
 
 PARAMS:
-    ~graph_path        (str,   default='~/vtr_graph')   directory with graph.pkl
-    ~goal_label        (str,   default='')              destination endpoint label
-    ~min_inliers       (int,   default=15)              floor for reliable match
+    ~graph_path        (str,   default='~/vtr_graph')   graph.pkl directory
+    ~waypoints_pkl     (str,   default='~/waypoints.pkl') VO waypoints file
+    ~goal_label        (str,   default='')              destination label
+    ~Kp                (float, default=0.8)             P-gain on flow error
+    ~min_inliers       (int,   default=15)              ORB fallback floor
     ~advance_votes     (int,   default=2)               consecutive frames to advance
     ~failure_timeout   (float, default=3.0)             seconds before pruning
     ~lookahead         (int,   default=3)               max jump attempts on failure
@@ -59,9 +65,10 @@ import os
 import pickle
 import time
 
-from std_msgs.msg import String
-from std_srvs.srv import Trigger, TriggerResponse
-from memory_graph import TopologicalMemoryGraph, Edge, KeyframeNode
+from std_msgs.msg      import String, Float32
+from std_srvs.srv      import Trigger, TriggerResponse
+from geometry_msgs.msg import Vector3
+from memory_graph      import TopologicalMemoryGraph, Edge, KeyframeNode
 
 # ── State machine constants ───────────────────────────────────────────────────
 
@@ -91,7 +98,7 @@ def load_graph(graph_path):
 def node_to_json(node):
     """
     Serialise a KeyframeNode to JSON string for publishing.
-    Includes descriptors_flat (N*32 uint8 values) and keypoint arrays.
+    Includes descriptors_flat (N*64 float32 values) and keypoint arrays.
     """
     if node is None:
         return json.dumps({'node_id': -1})
@@ -129,7 +136,12 @@ class RepeatControllerNode(object):
 
         # ── Params ────────────────────────────────────────────────────────
         self.graph_path      = rospy.get_param('~graph_path',      '~/vtr_graph')
+        # NEW — path to the VO waypoints pickle saved by teach_logger
+        self.waypoints_pkl   = os.path.expanduser(
+            rospy.get_param('~waypoints_pkl',  '~/waypoints.pkl'))
         self.goal_label      = rospy.get_param('~goal_label',      '')
+        # NEW — proportional gain on flow error (steering correction)
+        self.Kp              = rospy.get_param('~Kp',              0.8)
         self.min_inliers     = rospy.get_param('~min_inliers',     15)
         self.advance_votes   = rospy.get_param('~advance_votes',   2)
         self.failure_timeout = rospy.get_param('~failure_timeout', 3.0)
@@ -155,6 +167,7 @@ class RepeatControllerNode(object):
             return
 
         # ── Plan route ────────────────────────────────────────────────────
+        # ── Plan route ────────────────────────────────────────────────────
         self.route = []
         if self.goal_label:
             self.route = self.graph.plan_route(0, self.goal_label)
@@ -176,6 +189,21 @@ class RepeatControllerNode(object):
         rospy.loginfo("[REPEAT] Node sequence: %s%s",
                       str(self.route[:10]),
                       '...' if len(self.route) > 10 else '')
+
+        # ── NEW — Load VO waypoints ─────────────────────────────────────
+        self.waypoints = []
+        if os.path.exists(self.waypoints_pkl):
+            try:
+                with open(self.waypoints_pkl, 'rb') as f:
+                    self.waypoints = pickle.load(f)
+                rospy.loginfo('[REPEAT] Loaded %d VO waypoints from %s',
+                              len(self.waypoints), self.waypoints_pkl)
+            except Exception as e:
+                rospy.logwarn('[REPEAT] Could not load waypoints.pkl: %s', str(e))
+        else:
+            rospy.logwarn('[REPEAT] waypoints.pkl not found at %s — '
+                          'VO-primary mode disabled, using ORB only.',
+                          self.waypoints_pkl)
 
         # ── State ─────────────────────────────────────────────────────────
         self.state             = STATE_IDLE
@@ -199,19 +227,48 @@ class RepeatControllerNode(object):
         self.n_frames          = 0
         self.total_inliers     = 0
 
-        # ── Subscribers ───────────────────────────────────────────────────
+        # ── NEW — VO flow state ──────────────────────────────────────────
+        # wp_pointer: index into self.waypoints (separate from graph pointer)
+        self.wp_pointer        = 0
+
+        # Accumulated live flow since the last waypoint transition
+        self.live_acc_dx       = 0.0   # accumulated horizontal displacement
+        self.live_acc_dy       = 0.0   # accumulated vertical displacement
+        self.live_acc_dtheta   = 0.0   # accumulated rotation
+        self.live_acc_mag      = 0.0   # accumulated Euclidean magnitude
+
+        # Latest live flow values (from /vtr/live_flow)
+        self.last_live_dx      = 0.0
+        self.last_live_dy      = 0.0
+        self.last_live_dtheta  = 0.0
+
+        # Latest fusion state (from /vtr/fusion_state)
+        self.fusion_state      = 'vo_running'
+
+        # ── Subscribers ──────────────────────────────────────────────────
         rospy.Subscriber('/geometry/result', String,
                          self._cb_geo_result, queue_size=1)
 
-        # ── Publishers ────────────────────────────────────────────────────
-        self.pub_curr  = rospy.Publisher(
+        # NEW — live flow from the dedicated lk_flow_node
+        rospy.Subscriber('/vtr/live_flow', Vector3,
+                         self._cb_live_flow, queue_size=1)
+
+        # NEW — fusion arbitration state (checkpoint snap / vo_running)
+        rospy.Subscriber('/vtr/fusion_state', String,
+                         self._cb_fusion_state, queue_size=5)
+
+        # ── Publishers ─────────────────────────────────────────────────────
+        self.pub_curr     = rospy.Publisher(
             '/graph/current_node', String, queue_size=1)
-        self.pub_next  = rospy.Publisher(
+        self.pub_next     = rospy.Publisher(
             '/graph/next_node',    String, queue_size=1)
-        self.pub_state = rospy.Publisher(
+        self.pub_state    = rospy.Publisher(
             '/repeat/state', String, queue_size=5)
-        self.pub_stats = rospy.Publisher(
+        self.pub_stats    = rospy.Publisher(
             '/repeat/stats', String, queue_size=5)
+        # NEW — flow-corrected steering command for the actuator/PID bridge
+        self.pub_cmd_steer = rospy.Publisher(
+            '/repeat/cmd_steer', Float32, queue_size=1)
 
         # ── Services ──────────────────────────────────────────────────────
         rospy.Service('/repeat/start', Trigger, self._srv_start)
@@ -245,7 +302,109 @@ class RepeatControllerNode(object):
             return 0.0
         return 100.0 * self.pointer / max(len(self.route) - 1, 1)
 
-    # ── Geometry result callback ──────────────────────────────────────────
+    # ── NEW \u2014 VO-primary flow callbacks \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+
+    def _cb_live_flow(self, msg):
+        """
+        NEW \u2014 Receive live optical flow from lk_flow_node.
+
+        Called every camera frame.  Only active when state == RUNNING or
+        RECOVERING.
+
+        Actions:
+            1. Store latest per-frame displacement for P-controller.
+            2. Accumulate displacement into live_acc_{dx,dy,dtheta,mag}.
+            3. Compute P-gain steering correction and publish to /repeat/cmd_steer.
+            4. Advance waypoint pointer when accumulated magnitude >=
+               the recorded waypoint's flow_magnitude.
+        """
+        if self.state not in (STATE_RUNNING, STATE_RECOVERING):
+            return
+
+        # Store latest instantaneous frame displacement
+        self.last_live_dx     = msg.x
+        self.last_live_dy     = msg.y
+        self.last_live_dtheta = msg.z
+
+        # Accumulate magnitude (running odometry proxy)
+        frame_mag = (msg.x**2 + msg.y**2)**0.5
+        self.live_acc_dx     += msg.x
+        self.live_acc_dy     += msg.y
+        self.live_acc_dtheta += msg.z
+        self.live_acc_mag    += frame_mag
+
+        # \u2500\u2500 P-controller steering correction \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+        # Only compute if we have a valid waypoint to compare against
+        if self.waypoints and self.wp_pointer < len(self.waypoints):
+            wp = self.waypoints[self.wp_pointer]
+            # Error = deviation between recorded lateral flow and live lateral flow
+            # Positive error => we are drifting left => steer right (positive correction)
+            flow_error = wp.flow_dx - self.last_live_dx
+            steering_correction = self.Kp * flow_error
+            # Combine recorded steering with correction
+            cmd_steer = wp.steering + steering_correction
+            self.pub_cmd_steer.publish(Float32(data=float(cmd_steer)))
+
+        # \u2500\u2500 Waypoint advance based on accumulated magnitude \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+        # When the robot has accumulated enough motion to 'consume' the
+        # current waypoint's recorded flow, advance to the next waypoint.
+        if self.waypoints and self.wp_pointer < len(self.waypoints):
+            wp = self.waypoints[self.wp_pointer]
+            # Use a small epsilon guard to handle zero-magnitude waypoints
+            target_mag = max(wp.flow_magnitude, 1.0)
+            if self.live_acc_mag >= target_mag:
+                self._advance_wp_pointer()
+
+    def _advance_wp_pointer(self):
+        """
+        NEW \u2014 Move the VO waypoint pointer forward by one step.
+        Resets the live flow accumulators for the new window.
+        """
+        old_idx = self.wp_pointer
+        self.wp_pointer   += 1
+
+        # Reset live accumulators for the next waypoint interval
+        self.live_acc_dx     = 0.0
+        self.live_acc_dy     = 0.0
+        self.live_acc_dtheta = 0.0
+        self.live_acc_mag    = 0.0
+
+        if self.wp_pointer < len(self.waypoints):
+            wp = self.waypoints[self.wp_pointer]
+            rospy.loginfo(
+                '[REPEAT][VO] Waypoint advance %d \u2192 %d  '
+                'recorded_steer=%.3f  recorded_mag=%.2f',
+                old_idx, self.wp_pointer, wp.steering, wp.flow_magnitude
+            )
+        else:
+            rospy.loginfo(
+                '[REPEAT][VO] Reached last waypoint (%d)\u2014 no more VO data',
+                old_idx
+            )
+
+    def _cb_fusion_state(self, msg):
+        """
+        NEW \u2014 Receive arbitration state from fusion_node.
+
+        'checkpoint_snap' : ORB confirmed a keyframe match.  Reset the live
+                             drift accumulator so the flow controller re-syncs
+                             from the confirmed position.
+        'vo_running'      : Normal; no action needed here.
+        """
+        self.fusion_state = msg.data
+
+        if msg.data == 'checkpoint_snap':
+            # Snap: reset accumulated drift so fresh flow starts from a clean slate
+            self.live_acc_dx     = 0.0
+            self.live_acc_dy     = 0.0
+            self.live_acc_dtheta = 0.0
+            self.live_acc_mag    = 0.0
+            rospy.loginfo(
+                '[REPEAT][FUSION] Drift reset on checkpoint_snap '
+                '(wp_pointer=%d)', self.wp_pointer
+            )
+
+    # ── Geometry result callback (EXISTING, kept for ORB fallback) \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
 
     def _cb_geo_result(self, msg):
         """
@@ -468,6 +627,14 @@ class RepeatControllerNode(object):
         self.total_inliers     = 0
         self.t_run_start       = time.time()
         self.state             = STATE_RUNNING
+
+        # NEW \u2014 reset VO flow accumulators for a clean start
+        self.wp_pointer        = 0
+        self.live_acc_dx       = 0.0
+        self.live_acc_dy       = 0.0
+        self.live_acc_dtheta   = 0.0
+        self.live_acc_mag      = 0.0
+        self.fusion_state      = 'vo_running'
 
         # Publish first node immediately
         self._publish_targets()

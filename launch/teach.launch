@@ -28,15 +28,29 @@
 
 <launch>
 
-  <!-- ── Arguments ──────────────────────────────────────────────────── -->
-  <arg name="route_id"     default="route_0"/>
-  <arg name="endpoint"     default="lab"/>
-  <arg name="append_mode"  default="false"/>
-  <arg name="save_path"    default="$(env HOME)/vtr_graph"/>
-  <arg name="calib_path"   default="$(find vtr)/config/calibration.yaml"/>
-  <arg name="n_features"   default="1000"/>
-  <arg name="clip_limit"   default="2.0"/>
-  <arg name="debug_viz"    default="true"/>
+  <!-- ── Arguments ──────────────────────────────────────────────── -->
+  <arg name="route_id"         default="route_0"/>
+  <arg name="endpoint"         default="lab"/>
+  <arg name="append_mode"      default="false"/>
+  <arg name="save_path"        default="$(env HOME)/vtr_graph"/>
+  <!-- NEW: waypoints pickle output path for VO-primary repeat phase -->
+  <arg name="waypoints_pkl"    default="$(env HOME)/waypoints.pkl"/>
+  <arg name="calib_path"       default="$(find vtr)/config/calibration.yaml"/>
+  <arg name="n_features"       default="1000"/>
+  <arg name="clip_limit"       default="2.0"/>
+  <arg name="debug_viz"        default="true"/>
+
+  <!-- ── NEW: LK optical flow node (must start before teach_logger) ────── -->
+  <!-- Publishes /vtr/live_flow; teach_logger uses the same topic      -->
+  <node pkg="vtr" type="lk_flow_node.py"
+        name="lk_flow_node" output="screen" launch-prefix="">
+    <param name="max_corners"     value="200"/>
+    <param name="quality_level"   value="0.01"/>
+    <param name="min_dist"        value="10.0"/>
+    <param name="win_size"        value="21"/>
+    <param name="max_level"       value="3"/>
+    <param name="redetect_thresh" value="20"/>
+  </node>
 
   <!-- ── Step 3: ORB extractor ──────────────────────────────────────── -->
   <node pkg="vtr" type="orb_node.py"
@@ -82,13 +96,15 @@
   <!-- ── Step 6: Teach logger ───────────────────────────────────────── -->
   <node pkg="vtr" type="teach_logger.py"
         name="teach_logger" output="screen">
-    <param name="route_id"       value="$(arg route_id)"/>
-    <param name="endpoint_label" value="$(arg endpoint)"/>
-    <param name="save_path"      value="$(arg save_path)"/>
-    <param name="joy_topic"      value="/joy"/>
-    <param name="hud_width"      value="640"/>
-    <param name="hud_height"     value="120"/>
-    <param name="append_mode"    value="$(arg append_mode)"/>
+    <param name="route_id"           value="$(arg route_id)"/>
+    <param name="endpoint_label"     value="$(arg endpoint)"/>
+    <param name="save_path"          value="$(arg save_path)"/>
+    <!-- NEW: where to write the VO waypoints pickle -->
+    <param name="waypoints_pkl_path" value="$(arg waypoints_pkl)"/>
+    <param name="joy_topic"          value="/joy"/>
+    <param name="hud_width"          value="640"/>
+    <param name="hud_height"         value="120"/>
+    <param name="append_mode"        value="$(arg append_mode)"/>
   </node>
 
 </launch>

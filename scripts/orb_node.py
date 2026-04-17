@@ -35,6 +35,11 @@ PARAMS (set via rosparam or launch file):
     ~calib_path   (str,   default='')    path to calibration.yaml
     ~debug_viz    (bool,  default=True)  publish debug image
     ~publish_rate (int,   default=30)    max publish rate Hz
+    ~top_crop     (float, default=0.20)  fraction of image height to mask at top (ceiling)
+    ~bottom_crop  (float, default=0.25)  fraction of image height to mask at bottom (floor)
+    ~grid_cols    (int,   default=6)     spatial binning columns (0 = disabled)
+    ~grid_rows    (int,   default=3)     spatial binning rows    (0 = disabled)
+    ~kp_per_cell  (int,   default=12)    max keypoints kept per grid cell
 =============================================================================
 """
 
@@ -164,17 +169,56 @@ class ORBExtractor(object):
             n_features, n_levels, fast_thresh, lowe_ratio
         )
 
-    def extract(self, gray_clahe):
+    def extract(self, gray_clahe, mask=None):
         """
         Detect FAST keypoints and compute BRIEF descriptors.
         Returns (keypoints, descriptors) — descriptors is Nx32 uint8.
+        mask: optional uint8 np.ndarray (same HxW), 255=detect, 0=ignore.
         """
-        kps, descs = self.orb.detectAndCompute(gray_clahe, None)
+        kps, descs = self.orb.detectAndCompute(gray_clahe, mask)
 
         if descs is None or len(kps) == 0:
             return [], self._empty_desc
 
         return list(kps), descs
+
+    @staticmethod
+    def grid_subsample(kps, descs, img_h, img_w,
+                       grid_rows, grid_cols, kp_per_cell):
+        """
+        Spatial binning: keep only the top-kp_per_cell highest-response
+        keypoints in each (grid_rows x grid_cols) cell.
+        Prevents clustering on a single high-texture patch.
+        Returns filtered (kps_list, descs_ndarray).
+        """
+        if grid_rows <= 0 or grid_cols <= 0 or kp_per_cell <= 0:
+            return kps, descs
+        if len(kps) == 0:
+            return kps, descs
+
+        cell_h = float(img_h) / grid_rows
+        cell_w = float(img_w) / grid_cols
+
+        # Group indices by cell
+        cells = {}
+        for idx, kp in enumerate(kps):
+            r = int(min(kp.pt[1] / cell_h, grid_rows - 1))
+            c = int(min(kp.pt[0] / cell_w, grid_cols - 1))
+            key = (r, c)
+            if key not in cells:
+                cells[key] = []
+            cells[key].append(idx)
+
+        kept = []
+        for indices in cells.values():
+            # Sort by Harris response descending, keep top kp_per_cell
+            indices.sort(key=lambda i: -kps[i].response)
+            kept.extend(indices[:kp_per_cell])
+
+        kept.sort()   # preserve spatial order
+        kps_out   = [kps[i] for i in kept]
+        descs_out = descs[kept]
+        return kps_out, descs_out
 
     def match_ratio(self, desc_a, desc_b):
         """
@@ -271,16 +315,23 @@ class ORBNode(object):
         rospy.init_node('orb_extractor', anonymous=False)
 
         # ── Load params ───────────────────────────────────────────────────
-        n_features   = rospy.get_param('~n_features',   1000)
-        scale_factor = rospy.get_param('~scale_factor', 1.2)
-        n_levels     = rospy.get_param('~n_levels',     8)
-        fast_thresh  = rospy.get_param('~fast_thresh',  20)
-        lowe_ratio   = rospy.get_param('~lowe_ratio',   0.75)
-        clip_limit   = rospy.get_param('~clip_limit',   2.0)
-        tile_size    = rospy.get_param('~tile_size',    8)
-        calib_path   = rospy.get_param('~calib_path',   '')
-        self.debug   = rospy.get_param('~debug_viz',    True)
-        self.max_hz  = rospy.get_param('~publish_rate', 30)
+        n_features        = rospy.get_param('~n_features',   1000)
+        scale_factor      = rospy.get_param('~scale_factor', 1.2)
+        n_levels          = rospy.get_param('~n_levels',     8)
+        fast_thresh       = rospy.get_param('~fast_thresh',  20)
+        lowe_ratio        = rospy.get_param('~lowe_ratio',   0.75)
+        clip_limit        = rospy.get_param('~clip_limit',   2.0)
+        tile_size         = rospy.get_param('~tile_size',    8)
+        calib_path        = rospy.get_param('~calib_path',   '')
+        self.debug        = rospy.get_param('~debug_viz',    True)
+        self.max_hz       = rospy.get_param('~publish_rate', 30)
+        self.top_crop     = rospy.get_param('~top_crop',     0.20)
+        self.bottom_crop  = rospy.get_param('~bottom_crop',  0.25)
+        self.grid_cols    = rospy.get_param('~grid_cols',    6)
+        self.grid_rows    = rospy.get_param('~grid_rows',    3)
+        self.kp_per_cell  = rospy.get_param('~kp_per_cell',  12)
+        # Mask is built lazily on first frame (needs image size)
+        self._feat_mask   = None
 
         # ── Calibration ───────────────────────────────────────────────────
         K, D = load_calibration(calib_path)
@@ -349,10 +400,33 @@ class ORBNode(object):
         gray_clahe, bgr_undist = self.clahe.process(bgr)
         t_clahe = (time.time() - t0) * 1000.0
 
+        # ── Build horizontal band mask (once, lazily) ──────────────────
+        # Zeroes out ceiling (top top_crop%) and floor (bottom bottom_crop%)
+        if self._feat_mask is None or self._feat_mask.shape != (h, w):
+            self._feat_mask = np.zeros((h, w), dtype=np.uint8)
+            y_lo = int(h * self.top_crop)
+            y_hi = int(h * (1.0 - self.bottom_crop))
+            y_lo = max(0, min(y_lo, h - 1))
+            y_hi = max(y_lo + 1, min(y_hi, h))
+            self._feat_mask[y_lo:y_hi, :] = 255
+            rospy.loginfo(
+                "[ORB] Feature mask: rows %d-%d of %d  "
+                "(top_crop=%.0f%%  bottom_crop=%.0f%%)",
+                y_lo, y_hi, h,
+                self.top_crop * 100, self.bottom_crop * 100
+            )
+
         # ── ORB extraction ─────────────────────────────────────────────
         t1 = time.time()
-        kps, descs = self.orb.extract(gray_clahe)
+        kps, descs = self.orb.extract(gray_clahe, mask=self._feat_mask)
         t_orb = (time.time() - t1) * 1000.0
+
+        # ── Grid spatial subsampling ───────────────────────────────────
+        if len(kps) > 0:
+            kps, descs = self.orb.grid_subsample(
+                kps, descs, h, w,
+                self.grid_rows, self.grid_cols, self.kp_per_cell
+            )
 
         n_kp = len(kps)
 
@@ -439,6 +513,16 @@ class ORBNode(object):
         """
         out = bgr.copy()
 
+        # Shade masked-out zones (ceiling / floor)
+        overlay = out.copy()
+        y_lo = int(img_h * self.top_crop)
+        y_hi = int(img_h * (1.0 - self.bottom_crop))
+        cv2.rectangle(overlay, (0, 0),      (img_w, y_lo),  (0, 0, 0), -1)
+        cv2.rectangle(overlay, (0, y_hi),   (img_w, img_h), (0, 0, 0), -1)
+        cv2.addWeighted(overlay, 0.4, out, 0.6, 0, out)
+        # Active band border
+        cv2.rectangle(out, (0, y_lo), (img_w - 1, y_hi - 1), (0, 180, 80), 1)
+
         # Draw keypoints coloured by octave
         for kp in kps:
             oct_idx = min(kp.octave & 0xFF, len(OCTAVE_COLOURS) - 1)
@@ -447,13 +531,13 @@ class ORBNode(object):
             radius  = max(3, int(kp.size / 2))
             cv2.circle(out, centre, radius, colour, 1)
 
-        # 4x4 grid overlay
-        for r in range(1, 4):
-            y = r * img_h // 4
-            cv2.line(out, (0, y), (img_w, y), (50, 50, 50), 1)
-        for c in range(1, 4):
-            x = c * img_w // 4
-            cv2.line(out, (x, 0), (x, img_h), (50, 50, 50), 1)
+        # Spatial grid overlay (matches grid_cols x grid_rows)
+        for r in range(1, self.grid_rows):
+            y = y_lo + r * (y_hi - y_lo) // self.grid_rows
+            cv2.line(out, (0, y), (img_w, y), (60, 60, 60), 1)
+        for c in range(1, self.grid_cols):
+            x = c * img_w // self.grid_cols
+            cv2.line(out, (x, y_lo), (x, y_hi), (60, 60, 60), 1)
 
         # HUD bar
         cv2.rectangle(out, (0, 0), (img_w, 34), (0, 0, 0), -1)
