@@ -157,7 +157,35 @@ def main():
     default_top_k = int(os.environ.get('XFEAT_TOP_K', '512'))
 
     sys.stderr.write("[xfeat_worker] Loading XFeat model on %s...\n" % device)
-    xfeat = XFeat()
+    sys.stderr.write("[xfeat_worker] PyTorch version: %s\n" % torch.__version__)
+
+    # Support weight override for Jetson compatibility
+    weights_override = os.environ.get('XFEAT_WEIGHTS', '')
+
+    try:
+        if weights_override and os.path.isfile(weights_override):
+            # Load converted compatible weights
+            sys.stderr.write("[xfeat_worker] Using XFEAT_WEIGHTS=%s\n" % weights_override)
+            xfeat = XFeat(weights=None)   # init without loading
+            state_dict = torch.load(weights_override, map_location=device)
+            xfeat.net.load_state_dict(state_dict)
+        else:
+            # Default: let XFeat load its own weights
+            xfeat = XFeat()
+    except RuntimeError as e:
+        if 'jit' in str(e).lower() or 'ErrorReport' in str(e) or 'unknown type' in str(e).lower():
+            sys.stderr.write(
+                "\n[xfeat_worker] FATAL: Cannot load xfeat.pt — PyTorch version mismatch!\n"
+                "  Your PyTorch (%s) is too old for the saved weights format.\n\n"
+                "  FIX: On a machine with newer PyTorch, run:\n"
+                "    python3 scripts/convert_xfeat_weights.py /path/to/xfeat/weights/xfeat.pt\n\n"
+                "  Then copy xfeat_compat.pt to the Jetson and set:\n"
+                "    export XFEAT_WEIGHTS=/path/to/xfeat_compat.pt\n\n"
+                % torch.__version__
+            )
+        sys.stderr.flush()
+        sys.exit(1)
+
     # Move model to the selected device
     xfeat = xfeat.to(device) if hasattr(xfeat, 'to') else xfeat
     sys.stderr.write("[xfeat_worker] XFeat ready on %s. Waiting for frames.\n" % device)
