@@ -6,7 +6,7 @@ lk_flow_node.py  —  Lucas-Kanade Optical Flow ROS Node
 VT&R Project | VO-primary, VTR-assisted Architecture
 
 ROS NODE NAME : /lk_flow_node
-SUBSCRIBES    : /csi_camera_0/image_raw   (sensor_msgs/Image)
+SUBSCRIBES    : /csi_cam_0/image_raw   (sensor_msgs/Image)
 PUBLISHES     : /vtr/live_flow      (geometry_msgs/Vector3)
                     x = median horizontal displacement (dx) in pixels
                     y = median vertical displacement (dy) in pixels
@@ -75,7 +75,7 @@ class LKFlowNode(object):
             '/vtr/live_flow', Vector3, queue_size=1)
 
         # ── Subscribers ───────────────────────────────────────────────────
-        rospy.Subscriber('/csi_camera_0/image_raw', Image,
+        rospy.Subscriber('/csi_cam_0/image_raw', Image,
                          self._cb_image, queue_size=1,
                          buff_size=2**24)   # large buffer for raw images
 

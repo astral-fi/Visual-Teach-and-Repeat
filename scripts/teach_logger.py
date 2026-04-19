@@ -9,7 +9,7 @@ ROS NODE NAME : /teach_logger
 SUBSCRIBES    : /keyframe/saved       (vtr/FrameFeatures) — from step4
                 /graph/node_added     (std_msgs/String)   — from step5
                 /graph/status         (std_msgs/String)   — from step5
-                /csi_camera_0/image_raw     (sensor_msgs/Image) — NEW: LK flow
+                /csi_cam_0/image_raw     (sensor_msgs/Image) — NEW: LK flow
 PUBLISHES     : /teach/status         (std_msgs/String)   — JSON teach state
                 /teach/hud            (sensor_msgs/Image) — live HUD overlay
 
@@ -234,7 +234,7 @@ class TeachLoggerNode(object):
                          self._cb_graph_status, queue_size=2)
 
         # NEW — raw camera images for LK optical flow tracking
-        rospy.Subscriber('/csi_camera_0/image_raw', Image,
+        rospy.Subscriber('/csi_cam_0/image_raw', Image,
                          self._cb_image_raw, queue_size=1,
                          buff_size=2**24)   # large ring buffer for raw frames
 

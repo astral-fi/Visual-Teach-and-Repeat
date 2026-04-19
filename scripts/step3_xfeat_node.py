@@ -8,7 +8,7 @@ VT&R Project | Phase 2 — XFeat Integration
 REPLACES: step3_orb_node.py
 
 ROS NODE NAME : /orb_extractor  (topic names unchanged for compatibility)
-SUBSCRIBES    : /csi_camera_0/image_raw        (sensor_msgs/Image)
+SUBSCRIBES    : /csi_cam_0/image_raw        (sensor_msgs/Image)
 PUBLISHES     : /orb/keyframe_candidate  (vtr/FrameFeatures — custom msg)
                 /orb/debug_image         (sensor_msgs/Image)
                 /orb/stats               (std_msgs/String — JSON)
@@ -350,7 +350,7 @@ def grid_entropy(kp_x, kp_y, img_h, img_w, grid=4):
 class XFeatNode(object):
     """
     ROS Melodic node that:
-      1. Subscribes to /csi_camera_0/image_raw
+      1. Subscribes to /csi_cam_0/image_raw
       2. Sends frames to XFeat worker subprocess for feature extraction
       3. Publishes FrameFeatures to /orb/keyframe_candidate
       4. Publishes debug image to /orb/debug_image
@@ -401,7 +401,7 @@ class XFeatNode(object):
 
         # ── Subscribers ───────────────────────────────────────────────────
         self.sub_img = rospy.Subscriber(
-            '/csi_camera_0/image_raw', Image,
+            '/csi_cam_0/image_raw', Image,
             self._cb_image, queue_size=1, buff_size=2**24
         )
 
@@ -418,7 +418,7 @@ class XFeatNode(object):
 
         rospy.on_shutdown(self.xfeat.shutdown)
 
-        rospy.loginfo("[XFEAT] Node ready. Listening on /csi_camera_0/image_raw")
+        rospy.loginfo("[XFEAT] Node ready. Listening on /csi_cam_0/image_raw")
 
     # ── Image callback ────────────────────────────────────────────────────
 

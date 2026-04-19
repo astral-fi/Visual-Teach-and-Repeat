@@ -688,7 +688,7 @@ class GPUGeometryEngineNode(object):
         self.consec_fail = 0
 
         # ── Subscribers ───────────────────────────────────────────────────
-        rospy.Subscriber('/csi_camera_0/image_raw', Image,
+        rospy.Subscriber('/csi_cam_0/image_raw', Image,
                          self._cb_image, queue_size=1, buff_size=2**24)
         rospy.Subscriber('/graph/current_node', String,
                          self._cb_node, queue_size=5)

@@ -7,7 +7,7 @@ VT&R Project | Phase 2  (VO-primary, VTR-assisted extension)
 
 ROS NODE NAME : /repeat_controller
 SUBSCRIBES    : /geometry/result       (std_msgs/String)    — inlier counts
-                /csi_camera_0/image_raw      (sensor_msgs/Image)  — NEW: LK flow
+                /csi_cam_0/image_raw      (sensor_msgs/Image)  — NEW: LK flow
                 /vtr/live_flow         (geometry_msgs/Vector3) — from lk_flow_node
                 /vtr/fusion_state      (std_msgs/String)    — from fusion_node
 PUBLISHES     : /graph/current_node   (std_msgs/String)    — target for geo engine
