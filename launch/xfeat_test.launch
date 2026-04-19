@@ -19,12 +19,13 @@
   <arg name="top_k"        default="512"/>
   <arg name="clip_limit"   default="2.0"/>
   <arg name="debug_viz"    default="true"/>
-  <arg name="publish_rate" default="30"/>
+  <arg name="publish_rate" default="10"/>
   <arg name="top_crop"     default="0.20"/>
   <arg name="bottom_crop"  default="0.25"/>
   <arg name="grid_cols"    default="6"/>
   <arg name="grid_rows"    default="3"/>
   <arg name="kp_per_cell"  default="12"/>
+  <arg name="infer_scale"  default="0.5"/>
 
   <!-- ── Step 3: XFeat feature extractor ─────────────────────────── -->
   <node pkg="vtr" type="step3_xfeat_node.py"
@@ -40,6 +41,7 @@
     <param name="grid_cols"    value="$(arg grid_cols)"/>
     <param name="grid_rows"    value="$(arg grid_rows)"/>
     <param name="kp_per_cell"  value="$(arg kp_per_cell)"/>
+    <param name="infer_scale"  value="$(arg infer_scale)"/>
   </node>
 
 </launch>

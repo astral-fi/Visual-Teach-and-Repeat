@@ -366,12 +366,13 @@ class XFeatNode(object):
         tile_size         = rospy.get_param('~tile_size',    8)
         calib_path        = rospy.get_param('~calib_path',   '')
         self.debug        = rospy.get_param('~debug_viz',    True)
-        self.max_hz       = rospy.get_param('~publish_rate', 30)
+        self.max_hz       = rospy.get_param('~publish_rate', 10)
         self.top_crop     = rospy.get_param('~top_crop',     0.20)
         self.bottom_crop  = rospy.get_param('~bottom_crop',  0.25)
         self.grid_cols    = rospy.get_param('~grid_cols',    6)
         self.grid_rows    = rospy.get_param('~grid_rows',    3)
         self.kp_per_cell  = rospy.get_param('~kp_per_cell',  12)
+        self.infer_scale  = rospy.get_param('~infer_scale',  0.5)  # downscale for speed
 
         # Path to xfeat_worker.py
         default_worker = os.path.join(
@@ -447,9 +448,18 @@ class XFeatNode(object):
         bgr_undist = self.clahe.process(bgr)
         t_preprocess = (time.time() - t0) * 1000.0
 
+        # ── Downscale for faster XFeat inference (Jetson optimisation) ─
+        sc = self.infer_scale
+        if sc < 1.0:
+            small = cv2.resize(bgr_undist,
+                               (int(w * sc), int(h * sc)),
+                               interpolation=cv2.INTER_AREA)
+        else:
+            small = bgr_undist
+
         # ── XFeat feature extraction (via Python 3 subprocess) ────────
         t1 = time.time()
-        result = self.xfeat.extract(bgr_undist)
+        result = self.xfeat.extract(small)
         t_xfeat = (time.time() - t1) * 1000.0
 
         if result is None:
@@ -459,6 +469,10 @@ class XFeatNode(object):
         kp_xy  = result.get('keypoints',   np.empty((0, 2), dtype=np.float32))
         descs  = result.get('descriptors', np.empty((0, 64), dtype=np.float32))
         scores = result.get('scores',      np.empty((0,), dtype=np.float32))
+
+        # ── Rescale keypoints back to original image coordinates ──────
+        if sc < 1.0 and len(kp_xy) > 0:
+            kp_xy = kp_xy / sc
 
         # ── Band mask — filter out keypoints outside active zone ──────
         if len(kp_xy) > 0:
