@@ -156,9 +156,11 @@ def main():
     device = select_device()
     default_top_k = int(os.environ.get('XFEAT_TOP_K', '512'))
 
-    sys.stderr.write("[xfeat_worker] Loading XFeat model...\n")
+    sys.stderr.write("[xfeat_worker] Loading XFeat model on %s...\n" % device)
     xfeat = XFeat()
-    sys.stderr.write("[xfeat_worker] XFeat ready. Waiting for frames.\n")
+    # Move model to the selected device
+    xfeat = xfeat.to(device) if hasattr(xfeat, 'to') else xfeat
+    sys.stderr.write("[xfeat_worker] XFeat ready on %s. Waiting for frames.\n" % device)
     sys.stderr.flush()
 
     stdin  = sys.stdin.buffer

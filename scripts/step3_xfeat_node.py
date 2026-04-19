@@ -170,8 +170,8 @@ class XFeatBridge(object):
                 ['python3', self.worker_path],
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                bufsize=0,  # unbuffered
+                stderr=None,      # inherit — worker errors print to ROS console
+                bufsize=0,        # unbuffered
             )
             rospy.loginfo("[XFEAT] Worker PID=%d", self.proc.pid)
         except OSError as e:
@@ -189,6 +189,9 @@ class XFeatBridge(object):
         """Read length-prefixed pickle from worker stdout."""
         size_bytes = self.proc.stdout.read(4)
         if len(size_bytes) < 4:
+            # Worker died or closed stdout
+            rc = self.proc.poll()
+            rospy.logerr("[XFEAT] Worker stdout closed (exit code: %s)", rc)
             return None
         size = struct.unpack('>I', size_bytes)[0]
         data = b''
@@ -205,7 +208,11 @@ class XFeatBridge(object):
         """Check if the worker subprocess is still running."""
         if self.proc is None:
             return False
-        return self.proc.poll() is None
+        rc = self.proc.poll()
+        if rc is not None:
+            rospy.logerr("[XFEAT] Worker exited with code %d", rc)
+            return False
+        return True
 
     def extract(self, bgr_frame):
         """
