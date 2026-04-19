@@ -75,8 +75,8 @@ MAX_FEATURES       = 500
 MIN_FEATURES       = 150
 SAVE_THRESHOLD     = 0.6
 REJECT_THRESHOLD   = 0.4
-MIN_NOVELTY        = 0.15
-SIMILARITY_RATIO   = 0.75
+MIN_NOVELTY        = 0.05     # lowered for XFeat (was 0.15 for ORB)
+SIMILARITY_RATIO   = 0.6      # tightened for XFeat L2 (was 0.75 for Hamming)
 BORDERLINE_TIMEOUT = 2.0
 WEIGHTS            = (0.4, 0.4, 0.2)
 

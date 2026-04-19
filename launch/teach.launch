@@ -76,8 +76,8 @@
     <param name="min_features"       value="150"/>
     <param name="save_threshold"     value="0.6"/>
     <param name="reject_threshold"   value="0.4"/>
-    <param name="min_novelty"        value="0.15"/>
-    <param name="similarity_ratio"   value="0.75"/>
+    <param name="min_novelty"        value="0.05"/>
+    <param name="similarity_ratio"   value="0.6"/>
     <param name="borderline_timeout" value="2.0"/>
     <param name="weights"            value="0.4,0.4,0.2"/>
   </node>
