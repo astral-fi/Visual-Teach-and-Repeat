@@ -534,7 +534,7 @@ class TeachLoggerNode(object):
             self._do_stop()
         if rising(2):   # X — mark junction
             self._do_mark_junction()
-        if rising(0):   # A — mark endpoint with configured label
+        if rising(1):   # A — mark endpoint with configured label
             if self.ep_label:
                 self._do_mark_endpoint(self.ep_label)
 
