@@ -68,6 +68,14 @@ if os.path.isdir(XFEAT_PATH):
 
 import torch
 
+# Compatibility shim for PyTorch < 1.9 (Jetson Nano)
+# XFeat uses @torch.inference_mode() which was added in 1.9.
+# Fall back to torch.no_grad which is functionally equivalent for inference.
+if not hasattr(torch, 'inference_mode'):
+    torch.inference_mode = torch.no_grad
+    sys.stderr.write("[xfeat_worker] Patched torch.inference_mode → torch.no_grad "
+                     "(PyTorch %s)\n" % torch.__version__)
+
 try:
     from modules.xfeat import XFeat
 except ImportError:
