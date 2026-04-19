@@ -19,7 +19,7 @@ WHAT CHANGED:
 ROS NODE NAME : /geometry_engine
     (identical topic interface — drop-in replacement)
 
-SUBSCRIBES    : /camera/image_raw    (sensor_msgs/Image)
+SUBSCRIBES    : /csi_camera_0/image_raw    (sensor_msgs/Image)
                 /graph/current_node  (std_msgs/String, JSON with descriptors)
 PUBLISHES     : /geometry/path_error (std_msgs/Float32)
                 /geometry/result     (std_msgs/String, JSON)
@@ -461,7 +461,7 @@ class XFeatGeometryEngineNode(object):
         self.consec_fail = 0
 
         # ── Subscribers ───────────────────────────────────────────────────
-        rospy.Subscriber('/camera/image_raw', Image,
+        rospy.Subscriber('/csi_camera_0/image_raw', Image,
                          self._cb_image, queue_size=1, buff_size=2**24)
         rospy.Subscriber('/graph/current_node', String,
                          self._cb_node, queue_size=5)

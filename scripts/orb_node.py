@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """"
 ROS NODE NAME : /orb_extractor
-SUBSCRIBES    : /camera/image_raw        (sensor_msgs/Image)
+SUBSCRIBES    : /csi_camera_0/image_raw        (sensor_msgs/Image)
 PUBLISHES     : /orb/keyframe_candidate  (vtr/FrameFeatures — custom msg)
                 /orb/debug_image         (sensor_msgs/Image)
                 /orb/stats               (std_msgs/String — JSON)
@@ -304,7 +304,7 @@ class ORBExtractor(object):
 class ORBNode(object):
     """
     ROS Melodic node that:
-      1. Subscribes to /camera/image_raw
+      1. Subscribes to /csi_camera_0/image_raw
       2. Runs CLAHE + ORB extraction on every frame
       3. Publishes FrameFeatures to /orb/keyframe_candidate
       4. Publishes debug image to /orb/debug_image
@@ -362,7 +362,7 @@ class ORBNode(object):
 
         # ── Subscribers ───────────────────────────────────────────────────
         self.sub_img = rospy.Subscriber(
-            '/camera/image_raw', Image,
+            '/csi_camera_0/image_raw', Image,
             self._cb_image, queue_size=1, buff_size=2**24
         )
         self.sub_saved = rospy.Subscriber(
@@ -381,7 +381,7 @@ class ORBNode(object):
             '/orb/stats', String, queue_size=5
         )
 
-        rospy.loginfo("[ORB] Node ready. Listening on /camera/image_raw")
+        rospy.loginfo("[ORB] Node ready. Listening on /csi_camera_0/image_raw")
 
     # ── Image callback ────────────────────────────────────────────────────
 

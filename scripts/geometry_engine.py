@@ -6,7 +6,7 @@ step7_geometry_engine_node.py  —  ROS Melodic RANSAC Geometry Engine
 VT&R Project | Phase 2
 
 ROS NODE NAME : /geometry_engine
-SUBSCRIBES    : /camera/image_raw       (sensor_msgs/Image)
+SUBSCRIBES    : /csi_camera_0/image_raw       (sensor_msgs/Image)
                 /graph/current_node     (std_msgs/String)   — JSON node data
 PUBLISHES     : /geometry/path_error    (std_msgs/Float32)  — PID input
                 /geometry/result        (std_msgs/String)   — JSON full result
@@ -494,7 +494,7 @@ class GeometryEngineNode(object):
         self.consec_failures  = 0
 
         # ── Subscribers ───────────────────────────────────────────────────
-        rospy.Subscriber('/camera/image_raw', Image,
+        rospy.Subscriber('/csi_camera_0/image_raw', Image,
                          self._cb_image, queue_size=1, buff_size=2**24)
         rospy.Subscriber('/graph/current_node', String,
                          self._cb_node, queue_size=5)
