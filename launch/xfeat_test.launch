@@ -1,0 +1,45 @@
+<!-- vtr/launch/xfeat_test.launch -->
+<!--
+    Unit test launch — runs ONLY the XFeat feature extractor node.
+
+    Usage:
+        roslaunch vtr xfeat_test.launch
+        roslaunch vtr xfeat_test.launch top_k:=256 debug_viz:=false
+
+    Monitor:
+        rostopic echo /orb/stats
+        rostopic hz  /orb/keyframe_candidate
+        rqt_image_view /orb/debug_image
+-->
+
+<launch>
+
+  <!-- ── Arguments ──────────────────────────────────────────────── -->
+  <arg name="calib_path"   default="$(find vtr)/config/calibration.yaml"/>
+  <arg name="top_k"        default="512"/>
+  <arg name="clip_limit"   default="2.0"/>
+  <arg name="debug_viz"    default="true"/>
+  <arg name="publish_rate" default="30"/>
+  <arg name="top_crop"     default="0.20"/>
+  <arg name="bottom_crop"  default="0.25"/>
+  <arg name="grid_cols"    default="6"/>
+  <arg name="grid_rows"    default="3"/>
+  <arg name="kp_per_cell"  default="12"/>
+
+  <!-- ── Step 3: XFeat feature extractor ─────────────────────────── -->
+  <node pkg="vtr" type="step3_xfeat_node.py"
+        name="orb_extractor" output="screen">
+    <param name="calib_path"   value="$(arg calib_path)"/>
+    <param name="top_k"        value="$(arg top_k)"/>
+    <param name="clip_limit"   value="$(arg clip_limit)"/>
+    <param name="tile_size"    value="8"/>
+    <param name="debug_viz"    value="$(arg debug_viz)"/>
+    <param name="publish_rate" value="$(arg publish_rate)"/>
+    <param name="top_crop"     value="$(arg top_crop)"/>
+    <param name="bottom_crop"  value="$(arg bottom_crop)"/>
+    <param name="grid_cols"    value="$(arg grid_cols)"/>
+    <param name="grid_rows"    value="$(arg grid_rows)"/>
+    <param name="kp_per_cell"  value="$(arg kp_per_cell)"/>
+  </node>
+
+</launch>
