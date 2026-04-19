@@ -147,7 +147,7 @@ def read_message(stream):
             return None  # EOF mid-read
         data += chunk
         remaining -= len(chunk)
-    return pickle.loads(data)
+    return pickle.loads(data, encoding='latin1')
 
 
 def write_message(stream, obj):
