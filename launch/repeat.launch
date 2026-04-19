@@ -1,8 +1,7 @@
 <!-- vtr/launch/repeat.launch -->
 <!--
     Launches the complete Repeat phase pipeline:
-        step3_orb_node         — CLAHE + ORB extraction (reused from Teach)
-        step7_geometry_engine  — RANSAC + LK fallback → path_error
+        step7_xfeat_geometry   — XFeat matching + RANSAC + LK fallback → path_error
         step8_pid_controller   — PID + Ackermann → /cmd_vel
 
     Usage:
@@ -33,9 +32,11 @@
   <arg name="Kp"              default="0.8"/>
   <arg name="Ki"              default="0.02"/>
   <arg name="Kd"              default="0.1"/>
-  <!-- NEW: ORB match score threshold for checkpoint snapping -->
-  <arg name="orb_threshold"   default="0.75"/>
+  <!-- XFeat match score threshold for checkpoint snapping -->
+  <arg name="match_threshold" default="0.75"/>
   <arg name="debug_viz"       default="true"/>
+  <arg name="top_k"           default="512"/>
+  <arg name="match_ratio"     default="0.9"/>
 
 
   <!-- NEW: LK optical flow node — primary navigation backbone -->
@@ -49,11 +50,10 @@
     <param name="redetect_thresh" value="20"/>
   </node>
 
-  <!-- NEW: Fusion node — ORB checkpoint arbitration -->
+  <!-- NEW: Fusion node — checkpoint arbitration -->
   <node pkg="vtr" type="fusion_node.py"
         name="fusion_node" output="screen">
-    <!-- Expose ORB_THRESHOLD as a launch arg so it can be tuned at launch time -->
-    <param name="orb_threshold"   value="$(arg orb_threshold)"/>
+    <param name="orb_threshold"   value="$(arg match_threshold)"/>
     <param name="snap_cooldown_s" value="1.0"/>
   </node>
 
@@ -73,11 +73,10 @@
     <param name="publish_rate"    value="20.0"/>
   </node>
 
-  <!-- ── Step 7: Geometry engine ────────────────────────────────────── -->
-  <node pkg="vtr" type="geometry_engine.py"
+  <!-- ── Step 7: XFeat geometry engine (replaces geometry_engine.py) ── -->
+  <node pkg="vtr" type="step7_xfeat_geometry_node.py"
         name="geometry_engine" output="screen">
     <param name="calib_path"        value="$(arg calib_path)"/>
-    <param name="lowe_ratio"        value="0.75"/>
     <param name="ransac_threshold"  value="1.0"/>
     <param name="ransac_prob"       value="0.999"/>
     <param name="min_inliers"       value="15"/>
@@ -85,8 +84,11 @@
     <param name="w_lateral"         value="0.7"/>
     <param name="w_yaw"             value="0.3"/>
     <param name="clip_limit"        value="2.0"/>
-    <param name="n_features"        value="500"/>
+    <param name="top_k"             value="$(arg top_k)"/>
+    <param name="match_ratio"       value="$(arg match_ratio)"/>
     <param name="debug_viz"         value="$(arg debug_viz)"/>
+    <param name="top_crop"          value="0.20"/>
+    <param name="bottom_crop"       value="0.25"/>
   </node>
 
   <!-- ── Step 8: PID controller ─────────────────────────────────────── -->

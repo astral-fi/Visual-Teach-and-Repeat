@@ -1,7 +1,7 @@
 <!-- vtr/launch/teach.launch -->
 <!--
     Launches the complete Phase 1 Teach pipeline:
-        step3_orb_node        — CLAHE + ORB extraction
+        step3_xfeat_node      — XFeat learned feature extraction (Python 3 subprocess)
         step4_keyframe_scorer — quality scoring
         step5_memory_graph    — graph construction
         step6_teach_logger    — operator interface + HUD
@@ -36,7 +36,7 @@
   <!-- NEW: waypoints pickle output path for VO-primary repeat phase -->
   <arg name="waypoints_pkl"    default="$(env HOME)/waypoints.pkl"/>
   <arg name="calib_path"       default="$(find vtr)/config/calibration.yaml"/>
-  <arg name="n_features"       default="1000"/>
+  <arg name="top_k"            default="512"/>
   <arg name="clip_limit"       default="2.0"/>
   <arg name="debug_viz"        default="true"/>
 
@@ -52,19 +52,21 @@
     <param name="redetect_thresh" value="20"/>
   </node>
 
-  <!-- ── Step 3: ORB extractor ──────────────────────────────────────── -->
-  <node pkg="vtr" type="orb_node.py"
+  <!-- ── Step 3: XFeat feature extractor (replaces orb_node.py) ────── -->
+  <!-- Node name kept as 'orb_extractor' for topic compatibility       -->
+  <node pkg="vtr" type="step3_xfeat_node.py"
         name="orb_extractor" output="screen">
     <param name="calib_path"   value="$(arg calib_path)"/>
-    <param name="n_features"   value="$(arg n_features)"/>
-    <param name="scale_factor" value="1.2"/>
-    <param name="n_levels"     value="8"/>
-    <param name="fast_thresh"  value="20"/>
-    <param name="lowe_ratio"   value="0.75"/>
+    <param name="top_k"        value="$(arg top_k)"/>
     <param name="clip_limit"   value="$(arg clip_limit)"/>
     <param name="tile_size"    value="8"/>
     <param name="debug_viz"    value="$(arg debug_viz)"/>
     <param name="publish_rate" value="30"/>
+    <param name="top_crop"     value="0.20"/>
+    <param name="bottom_crop"  value="0.25"/>
+    <param name="grid_cols"    value="6"/>
+    <param name="grid_rows"    value="3"/>
+    <param name="kp_per_cell"  value="12"/>
   </node>
 
   <!-- ── Step 4: Keyframe scorer ────────────────────────────────────── -->
